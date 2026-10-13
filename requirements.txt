@@ -1,0 +1,8 @@
+# Audiobook Organizer dependencies
+PySide6>=6.6
+mutagen>=1.46
+Pillow>=10.0
+ebooklib>=0.18
+pypdf>=4.0
+# Needed only to build the Windows .exe (GitHub Actions installs it too)
+pyinstaller>=6.0
