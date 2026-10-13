@@ -102,14 +102,14 @@ class MainWindow(QMainWindow):
         folder = QFileDialog.getExistingDirectory(
             self, "Import folder into library", self._library_root)
         if folder:
-            self._start_scan(folder)
+            self._start_scan(folder, group_root=True)
 
-    def _start_scan(self, root):
+    def _start_scan(self, root, group_root=False):
         if self._scan_worker is not None and self._scan_worker.isRunning():
             self.statusBar().showMessage("A scan is already running…")
             return
         self._scan_worker = ScanWorker(root, self._db, self._covers_dir,
-                                       self)
+                                       self, group_root=group_root)
         self._scan_worker.progress.connect(self._on_scan_progress)
         self._scan_worker.done.connect(self._on_scan_done)
         self._scan_worker.error.connect(
@@ -130,14 +130,15 @@ class MainWindow(QMainWindow):
     def _on_scan_done(self, new_count, total):
         self._scan_worker = None
         self.statusBar().showMessage(
-            f"Scan complete: {total} files, {new_count} new books added.")
+            f"Scan complete: {total} books, {new_count} new added.")
         self._library_tab.refresh_tags()
         self._library_tab.refresh()
         self._report_tab.refresh()
         self._refresh_organize()
         # Run the next queued scan (e.g. several dropped folders).
         if self._pending_scans:
-            self._start_scan(self._pending_scans.pop(0))
+            folder, group_root = self._pending_scans.pop(0)
+            self._start_scan(folder, group_root=group_root)
 
     @Slot(str, str)
     def _on_worker_error(self, which, msg):
@@ -149,7 +150,8 @@ class MainWindow(QMainWindow):
             self._undo_worker = None
         QMessageBox.warning(self, "Something went wrong", msg)
         if self._pending_scans:
-            self._start_scan(self._pending_scans.pop(0))
+            folder, group_root = self._pending_scans.pop(0)
+            self._start_scan(folder, group_root=group_root)
 
     # -- organize / undo ---------------------------------------------
 
@@ -203,11 +205,38 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(
             f"Moving {len(plan)} files…")
 
+    def _relocate_book(self, book_id):
+        """Point a book's own path/rel at where its chapters now live.
+
+        Single-chapter book: the chapter file itself. Folder-book: the
+        folder the chapters now share (e.g. Author/Book after organize,
+        or the original folder after undo).
+        """
+        book = self._db.get_book(book_id)
+        if not book or not book.get("chapters"):
+            return
+        chapters = book["chapters"]
+        root = self._library_root
+        if len(chapters) == 1:
+            ch = chapters[0]
+            self._db.set_location(book_id, ch["path"], ch["rel"])
+            return
+        try:
+            parent = os.path.commonpath([c["path"] for c in chapters])
+        except ValueError:
+            parent = str(Path(chapters[0]["path"]).parent)
+        try:
+            rel = str(Path(parent).relative_to(root))
+        except ValueError:
+            rel = os.path.relpath(parent, root)
+        self._db.set_location(book_id, parent, rel)
+
     @Slot(str)
     def _on_organize_done(self, log_path):
         self._organize_worker = None
         root = Path(self._library_root)
         moved = 0
+        affected = set()
         try:
             entries = json.loads(Path(log_path).read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
@@ -215,10 +244,12 @@ class MainWindow(QMainWindow):
         for entry in entries:
             old_abs = str(root / entry["from"])
             new_abs = str(root / entry["to"])
-            book = self._db.find_by_path(old_abs)
-            if book:
-                self._db.mark_moved(book["id"], new_abs, entry["to"])
+            book_id = self._db.mark_moved(old_abs, new_abs, entry["to"])
+            if book_id is not None:
+                affected.add(book_id)
                 moved += 1
+        for book_id in affected:
+            self._relocate_book(book_id)
         pruned = self._db.prune_missing()
         self._duplicates_tab.mark_stale()  # paths changed; re-detect later
         self._library_tab.refresh()
@@ -255,13 +286,16 @@ class MainWindow(QMainWindow):
     def _on_undo_done(self, count):
         self._undo_worker = None
         root = Path(self._library_root)
+        affected = set()
         for entry in getattr(self, "_undo_entries", []):
             was_abs = str(root / entry["to"])    # where the file was
             back_abs = str(root / entry["from"])  # where it is again
-            book = self._db.find_by_path(was_abs)
-            if book:
-                self._db.mark_moved(book["id"], back_abs, entry["from"])
+            book_id = self._db.mark_moved(was_abs, back_abs, entry["from"])
+            if book_id is not None:
+                affected.add(book_id)
         self._undo_entries = []
+        for book_id in affected:
+            self._relocate_book(book_id)
         self._db.prune_missing()
         self._duplicates_tab.mark_stale()
         self._library_tab.refresh()
@@ -300,6 +334,9 @@ class MainWindow(QMainWindow):
             QMessageBox.StandardButton.Yes)
         if answer != QMessageBox.StandardButton.Yes:
             return
-        self._pending_scans.extend(folders)
+        # (folder, group_root): a dropped folder is usually a single
+        # book, so its loose files count as chapters of one book.
+        self._pending_scans.extend((f, True) for f in folders)
         if self._scan_worker is None or not self._scan_worker.isRunning():
-            self._start_scan(self._pending_scans.pop(0))
+            folder, group_root = self._pending_scans.pop(0)
+            self._start_scan(folder, group_root=group_root)

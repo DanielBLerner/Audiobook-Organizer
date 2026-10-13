@@ -70,7 +70,7 @@ class OrganizeTab(QWidget):
         self._plan = list(plan)
         if outside_count:
             self._note.setText(
-                f"{outside_count} file(s) live outside the library folder "
+                f"{outside_count} book(s) live outside the library folder "
                 "and are not included in this plan.")
         else:
             self._note.setText("")

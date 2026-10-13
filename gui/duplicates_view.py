@@ -68,7 +68,7 @@ class DuplicatesTab(QWidget):
         if self._worker is not None and self._worker.isRunning():
             return
         books = self._db.list_books()
-        self._status.setText(f"Checking {len(books)} files…")
+        self._status.setText(f"Checking {len(books)} books…")
         self._refresh_btn.setEnabled(False)
         self._worker = DuplicatesWorker(books, self)
         self._worker.done.connect(self._on_done)

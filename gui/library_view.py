@@ -21,7 +21,7 @@ SORT_FIELDS = [
     ("Language", "lang"),
 ]
 
-COLUMNS = ["", "Title", "Author", "Book", "Kind", "Tags",
+COLUMNS = ["", "Title", "Author", "Book", "Kind", "Chapters", "Tags",
            "Date added", "Language"]
 COL_COVER, COL_TITLE = 0, 1
 
@@ -159,6 +159,7 @@ class LibraryTab(QWidget):
                 book.get("author") or "",
                 book.get("book") or "",
                 book.get("kind") or "",
+                str(book.get("chapter_count") or 1),
                 ", ".join(book.get("tags") or []),
                 book.get("date_added") or "",
                 book.get("lang") or "",

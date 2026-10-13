@@ -6,7 +6,8 @@ from PySide6.QtCore import Qt, Signal, Slot
 from PySide6.QtGui import QPixmap, QColor
 from PySide6.QtWidgets import (
     QWidget, QLabel, QPushButton, QLineEdit, QVBoxLayout, QHBoxLayout,
-    QFileDialog, QMessageBox, QFormLayout,
+    QFileDialog, QMessageBox, QFormLayout, QListWidget, QListWidgetItem,
+    QAbstractItemView,
 )
 
 from mutagen import File as MutagenFile
@@ -20,6 +21,12 @@ from backend import (
     UnsupportedFormatError,
 )
 from gui.player import PlayerWidget
+
+
+def _chapter_label(ch):
+    track = (ch.get("track") or "").strip()
+    title = ch.get("title") or Path(ch.get("path") or "").name
+    return f"{track} — {title}" if track else title
 
 
 def _flag_text(book):
@@ -71,6 +78,15 @@ class DetailPanel(QWidget):
 
         self._player = PlayerWidget()
 
+        self._chapter_label = QLabel("Chapters")
+        self._chapter_list = QListWidget()
+        self._chapter_list.setMaximumHeight(150)
+        self._chapter_list.setSelectionMode(
+            QAbstractItemView.SelectionMode.SingleSelection)
+        self._chapter_list.itemClicked.connect(self._on_chapter_clicked)
+        self._chapter_list.itemDoubleClicked.connect(
+            self._on_chapter_double_clicked)
+
         self._info_path = QLabel()
         self._info_path.setWordWrap(True)
         self._info_path.setTextInteractionFlags(
@@ -103,6 +119,8 @@ class DetailPanel(QWidget):
 
         self._player_title = QLabel("Preview")
         layout.addWidget(self._player_title)
+        layout.addWidget(self._chapter_label)
+        layout.addWidget(self._chapter_list)
         layout.addWidget(self._player)
 
         layout.addWidget(QLabel("Details"))
@@ -148,19 +166,55 @@ class DetailPanel(QWidget):
         self._info_flags.setText(_flag_text(book))
 
         if book.get("kind") == "audio":
+            chapters = book.get("chapters") or []
+            multi = len(chapters) > 1
             self._player_title.setVisible(True)
             self._player.setVisible(True)
-            self._player.load(book["path"])
+            self._chapter_label.setVisible(multi)
+            self._chapter_list.setVisible(multi)
+            if multi:
+                self._chapter_list.blockSignals(True)
+                self._chapter_list.clear()
+                for ch in chapters:
+                    item = QListWidgetItem(_chapter_label(ch))
+                    item.setData(Qt.UserRole, ch["path"])
+                    item.setToolTip(ch["path"])
+                    self._chapter_list.addItem(item)
+                self._chapter_list.blockSignals(False)
+                if chapters:
+                    self._chapter_list.setCurrentRow(0)
+                    self._player.load(chapters[0]["path"])
+                else:
+                    self._player.clear()
+            else:
+                self._player.load(chapters[0]["path"] if chapters
+                                  else book["path"])
         else:
             self._player_title.setVisible(False)
             self._player.setVisible(False)
+            self._chapter_label.setVisible(False)
+            self._chapter_list.setVisible(False)
             self._player.clear()
 
     def clear(self):
         self._book_id = None
+        self._chapter_list.clear()
         self._player.clear()
 
     # -- slots -------------------------------------------------------
+
+    @Slot()
+    def _on_chapter_clicked(self):
+        item = self._chapter_list.currentItem()
+        if item:
+            self._player.load(item.data(Qt.UserRole))
+
+    @Slot()
+    def _on_chapter_double_clicked(self):
+        item = self._chapter_list.currentItem()
+        if item:
+            self._player.load(item.data(Qt.UserRole))
+            self._player.play()
 
     @Slot()
     def _pick_cover(self):
@@ -169,11 +223,15 @@ class DetailPanel(QWidget):
         book = self._db.get_book(self._book_id)
         if not book:
             return
-        if not can_set_cover(book.get("ext") or ""):
+        # A folder-book's cover belongs on every chapter file that can
+        # carry one; a single-file book behaves exactly as before.
+        targets = [ch["path"] for ch in (book.get("chapters") or [])
+                   if can_set_cover(ch.get("ext") or "")]
+        if not targets:
             QMessageBox.warning(
                 self, "Cover art not supported",
-                f"This app can't write cover art to {book.get('ext')} "
-                f"files. Supported: MP3, M4B/M4A, FLAC, OGG/Opus, EPUB.")
+                "None of this book's files can carry cover art. "
+                "Supported: MP3, M4B/M4A, FLAC, OGG/Opus, EPUB.")
             return
         fname, _ = QFileDialog.getOpenFileName(
             self, "Choose cover image", "",
@@ -186,17 +244,21 @@ class DetailPanel(QWidget):
             QMessageBox.warning(self, "Couldn't read image",
                                 f"Couldn't read that file:\n{e}")
             return
-        try:
-            set_cover(book["path"], image_bytes)
-        except UnsupportedFormatError as e:
-            QMessageBox.warning(self, "Cover art not supported", str(e))
-            return
-        except CoverError as e:
-            QMessageBox.warning(self, "Couldn't set cover", str(e))
+        written, skipped = [], []
+        for target in targets:
+            try:
+                set_cover(target, image_bytes)
+                written.append(target)
+            except (UnsupportedFormatError, CoverError):
+                skipped.append(Path(target).name)
+        if not written:
+            QMessageBox.warning(self, "Couldn't set cover",
+                                "None of the book's files accepted the "
+                                "cover image. Nothing was changed.")
             return
         # Cache a copy so the library view stays fast.
         try:
-            art = extract_cover(book["path"]) or image_bytes
+            art = extract_cover(written[0]) or image_bytes
             self._covers_dir.mkdir(parents=True, exist_ok=True)
             cache = self._covers_dir / f"{book['id']}.jpg"
             cache.write_bytes(art)
@@ -205,7 +267,14 @@ class DetailPanel(QWidget):
             self.statusMessage.emit(f"Cover set, but caching failed: {e}")
         self.show_book(book["id"])
         self.coverChanged.emit()
-        self.statusMessage.emit("Cover updated.")
+        if skipped:
+            names = ", ".join(skipped[:3]) + ("…" if len(skipped) > 3 else "")
+            self.statusMessage.emit(
+                f"Cover written to {len(written)} file(s); "
+                f"skipped {len(skipped)}: {names}")
+        else:
+            self.statusMessage.emit(
+                f"Cover written to {len(written)} file(s).")
 
     @Slot()
     def _save_metadata(self):
@@ -239,8 +308,16 @@ class DetailPanel(QWidget):
     # -- helpers -----------------------------------------------------
 
     def _write_embedded_tags(self, book, title, author):
-        """Write title/author into the file itself. Returns None on
-        success, or a short note explaining what didn't happen."""
+        """Write title/author into the file(s) themselves. Returns None
+        on success, or a short note explaining what didn't happen.
+
+        For a folder-book the book title goes into each chapter's
+        *album* tag (chapter titles are left alone) and the author into
+        *artist*; single-file books keep the old title/artist behavior.
+        """
+        chapters = book.get("chapters") or []
+        if len(chapters) > 1 and book.get("kind") == "audio":
+            return self._write_chapter_tags(chapters, title, author)
         path = book.get("path") or ""
         ext = (book.get("ext") or "").lower()
         if not path or not Path(path).exists():
@@ -269,4 +346,31 @@ class DetailPanel(QWidget):
                         "library updated only.")
         except Exception as e:
             return f"Couldn't write into the file ({e}); library updated only."
+        return None
+
+    @staticmethod
+    def _write_chapter_tags(chapters, book_title, author):
+        """Write album/artist into every audio chapter. Returns None on
+        success or a note."""
+        ok, total = 0, 0
+        for ch in chapters:
+            ext = (ch.get("ext") or "").lower()
+            if ext not in AUDIO_EXTS or not Path(ch["path"]).exists():
+                continue
+            total += 1
+            try:
+                audio = MutagenFile(ch["path"], easy=True)
+                if audio is None:
+                    continue
+                audio["album"] = [book_title]
+                audio["artist"] = [author]
+                audio.save()
+                ok += 1
+            except Exception:
+                continue
+        if not total:
+            return "No chapter files could be tagged; library updated only."
+        if ok < total:
+            return (f"Saved to library. Tags written to {ok} of {total} "
+                    f"chapter files.")
         return None

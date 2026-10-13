@@ -74,7 +74,7 @@ class ReportTab(QWidget):
                 child.widget().deleteLater()
 
         self._summary.setText(
-            f"{stats['total']} files · {stats['books']} books · "
+            f"{stats['books']} books · {stats['chapters']} chapters · "
             f"library folder: {self._get_root()}")
 
         self._body.addWidget(_section("Formats"))
@@ -85,8 +85,8 @@ class ReportTab(QWidget):
 
         self._body.addWidget(_section("Data quality"))
         quality = QLabel(
-            f"Files with embedded tags: {stats['tagged']} of {stats['total']}\n"
-            f"Files with mojibake in the name: {stats['mojibake']}")
+            f"Books with embedded tags: {stats['tagged']} of {stats['total']}\n"
+            f"Books with mojibake in the name: {stats['mojibake']}")
         quality.setObjectName("dimLabel")
         self._body.addWidget(quality)
 

@@ -27,9 +27,20 @@ def find_duplicates(items):
     exact_groups = []
     near_groups = []
 
-    # Exact: same size + same sha256.
-    by_size = {}
+    # Exact: same size + same sha256, compared chapter-file by
+    # chapter-file (a book is its chapters).
+    flat = []
     for it in items:
+        chapters = it.get("chapters") or []
+        if chapters:
+            for ch in chapters:
+                flat.append({"path": ch["path"], "rel": ch["rel"],
+                             "author": it["author"], "book": it["book"]})
+        else:
+            flat.append(it)
+
+    by_size = {}
+    for it in flat:
         try:
             size = Path(it["path"]).stat().st_size
         except OSError:
@@ -50,7 +61,10 @@ def find_duplicates(items):
             if len(dupes) > 1:
                 exact_groups.append(dupes)
 
-    # Near: same normalized author+book, distinct files.
+    # Near: same normalized author+book on distinct books (e.g. the
+    # same book in MP3 and M4B, or two rips). Compared at book level
+    # so a folder-book's own chapters never flag as near-duplicates
+    # of each other.
     by_book = {}
     for it in items:
         key = (it["author"].strip().lower(), it["book"].strip().lower())

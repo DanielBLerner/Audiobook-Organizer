@@ -15,15 +15,36 @@ from .text import clean_name
 OWN_PREFIX = "_audiobook_org_"
 
 
+def _iter_files(items):
+    """Yield one per-file plan entry per book.
+
+    Books carry a ``chapters`` list; each chapter becomes its own
+    planned move (Author/Book/NN - Title.ext), so a whole folder-book
+    moves together. Plain per-file dicts (no ``chapters`` key) are
+    yielded as-is for backwards compatibility.
+    """
+    for it in items:
+        chapters = it.get("chapters")
+        if chapters:
+            for ch in chapters:
+                yield {"src": ch["path"], "author": it["author"],
+                       "book": it["book"], "title": ch["title"],
+                       "track": ch["track"], "ext": ch["ext"]}
+        else:
+            yield it
+
+
 def build_plan(items):
     """Compute Author/Book/NN - Title.ext destinations.
 
-    items: iterable of dicts with keys src (or path), author, book,
-    title, track, ext. Returns [(src_path_str, dst_rel_str), ...].
+    items: iterable of book dicts (with ``chapters``) or plain per-file
+    dicts with keys src (or path), author, book, title, track, ext.
+    Returns [(src_path_str, dst_rel_str), ...] - one entry per file, so
+    every chapter of a folder-book is planned (and undone) together.
     """
     plan = []
     used = set()
-    for it in items:
+    for it in _iter_files(items):
         src = it.get("src") or it.get("path")
         if it.get("track"):
             fname = f"{int(it['track']):02d} - {it['title']}{it['ext']}"

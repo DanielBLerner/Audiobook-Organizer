@@ -68,6 +68,11 @@ class PlayerWidget(QWidget):
         self._player.stop()
         self._player.setPosition(0)
 
+    def play(self):
+        """Start playback of the loaded file (if any)."""
+        if self._path:
+            self._player.play()
+
     def clear(self):
         self.stop()
         self._path = None

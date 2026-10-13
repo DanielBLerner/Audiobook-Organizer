@@ -2,22 +2,30 @@
 repairs garbled text, and guesses languages.
 
 scan() is non-destructive - it only reads. Every item it returns is a
-plain dict with these keys:
+plain dict describing one *book* (a folder of chapter files counts as
+one book - see backend.grouping), with these keys:
 
-    path       absolute file path (str)
+    path       absolute path: the book folder, or the file for a
+               single-file book (str)
     rel        path relative to the scanned root (str, OS separators)
     kind       'audio' or 'ebook'
-    ext        lowercase extension, e.g. '.mp3'
+    ext        lowercase extension of the primary file, e.g. '.mp3'
     author     cleaned author name
     book       cleaned book title
-    title      cleaned track/chapter title (audio) or book title (ebook)
-    track      track number as string, '' if unknown
+    title      cleaned track/chapter title (single-file audio),
+               book title (folder-book), or book title (ebook)
+    track      track number as string, '' if unknown / not applicable
     lang       'Russian', 'Russian (transliterated?)', or 'English / other'
     has_tags   True when usable embedded metadata was found
-    mojibake   True when the filename looked garbled but repairable
+    mojibake   True when a name looked garbled but repairable
     translit   True when the metadata looks like transliterated Russian
                (flag for human review only - never auto-renamed)
-    has_art    True when embedded cover art was found
+    has_art    True when embedded cover art (or a folder cover image)
+               was found
+    chapters   list of {path, rel, title, track, ext}, in chapter order
+    chapter_count  len(chapters)
+    folder_cover   absolute path of a cover image found in the book's
+                   folder, or None
 """
 
 import re
@@ -265,6 +273,11 @@ def _scan_audio(root, p, rel):
             " ".join([tags.get("author") or "", tags.get("book") or "",
                       tags.get("title") or ""])),
         "has_art": _audio_has_art(p),
+        # Raw tag values for folder-as-book grouping (most common
+        # album/author across chapters wins). Stripped out by the
+        # grouping step; never stored in the database.
+        "_raw_author": tags.get("author") or "",
+        "_raw_book": tags.get("book") or "",
     }
 
 
@@ -290,10 +303,16 @@ def _scan_ebook(root, p, rel):
     }
 
 
-def scan(root):
-    """Recursively scan *root* for audiobooks and ebooks. Read-only."""
+def scan(root, group_root=False):
+    """Recursively scan *root* for audiobooks and ebooks. Read-only.
+
+    Returns one dict per *book*: a folder of chapter audio files is a
+    single book (see backend.grouping). Each book dict carries a
+    ``chapters`` list with one entry per file.
+    """
+    from .grouping import group_items  # local import: keeps import light
     root = Path(root).expanduser().resolve()
-    items = []
+    file_items = []
     for p in sorted(root.rglob("*")):
         if not p.is_file() or p.suffix.lower() not in SUPPORTED_EXTS:
             continue
@@ -301,10 +320,10 @@ def scan(root):
             continue
         rel = p.relative_to(root)
         if p.suffix.lower() in AUDIO_EXTS:
-            items.append(_scan_audio(root, p, rel))
+            file_items.append(_scan_audio(root, p, rel))
         else:
-            items.append(_scan_ebook(root, p, rel))
-    return items
+            file_items.append(_scan_ebook(root, p, rel))
+    return group_items(file_items, root, group_root=group_root)
 
 
 # --------------------------------------------------------------------------
@@ -312,11 +331,14 @@ def scan(root):
 # --------------------------------------------------------------------------
 
 def scan_stats(items):
+    """Statistics over book dicts (as returned by scan() or the DB)."""
     formats = {}
     languages = {}
+    chapters = 0
     for it in items:
         formats[it["ext"]] = formats.get(it["ext"], 0) + 1
         languages[it["lang"]] = languages.get(it["lang"], 0) + 1
+        chapters += it.get("chapter_count") or 1
 
     books = {(it["author"], it["book"]) for it in items}
     suspects = sorted({(it["author"], it["book"]) for it in items
@@ -325,10 +347,12 @@ def scan_stats(items):
               if not it["has_tags"] and it["author"] == "Unknown Author"]
 
     from .organize import build_plan  # local import: no cycle at call time
-    preview = [(src, dst) for src, dst in build_plan(items)[:15]]
+    plan = build_plan(items)
+    preview = [(src, dst) for src, dst in plan[:15]]
 
     return {
         "total": len(items),
+        "chapters": chapters,
         "formats": dict(sorted(formats.items(), key=lambda x: -x[1])),
         "languages": dict(sorted(languages.items(), key=lambda x: -x[1])),
         "tagged": sum(1 for it in items if it["has_tags"]),
@@ -338,5 +362,5 @@ def scan_stats(items):
         "review": sorted(review, key=lambda x: x["rel"])[:50],
         "review_total": len(review),
         "preview": preview,
-        "preview_total": len(items),
+        "preview_total": len(plan),
     }
