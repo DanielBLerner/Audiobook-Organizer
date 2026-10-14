@@ -143,6 +143,13 @@ def _folder_book(dirpath, files, root):
         "chapters": chapters,
         "chapter_count": len(chapters),
         "folder_cover": str(cover) if cover else None,
+        # Where the voted guesses came from, for the UI review flags.
+        "sources": {
+            "author": ("embedded tags"
+                       if any(a and a.strip() for a in authors)
+                       else "none"),
+            "title": "embedded tags" if album else "folder name",
+        },
     }
 
 

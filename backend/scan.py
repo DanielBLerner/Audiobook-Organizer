@@ -26,6 +26,12 @@ one book - see backend.grouping), with these keys:
     chapter_count  len(chapters)
     folder_cover   absolute path of a cover image found in the book's
                    folder, or None
+    sources    dict recording where the author/title guesses came from:
+               {"author": "embedded tags"|"folder name"|"filename"|"none",
+                "title":  "embedded tags"|"folder name"|"filename"|"none"}
+               (the UI uses this to flag guesses that need human review)
+
+Nothing here renames, moves, or deletes anything.
 """
 
 import re
@@ -247,12 +253,19 @@ def _scan_audio(root, p, rel):
     num = m.group(1) if m else ""
     stem_rest = p.stem[m.end():] if m else p.stem
 
-    author = clean_name(tags.get("author") or "Unknown Author")
-    book = tags.get("book")
-    if not book:
+    author_src = "embedded tags"
+    raw_author = tags.get("author")
+    if not raw_author:
+        author_src = "none"
+    author = clean_name(raw_author or "Unknown Author")
+
+    title_src = "embedded tags"
+    raw_book = tags.get("book")
+    if not raw_book:
         # parent folder name is often the book title in messy rips
-        book = _prettify(p.parent.name) if p.parent != root else ""
-    book = clean_name(book or "Unknown Book")
+        raw_book = _prettify(p.parent.name) if p.parent != root else ""
+        title_src = "folder name" if raw_book else "none"
+    book = clean_name(raw_book or "Unknown Book")
     title = clean_name(tags.get("title") or _prettify(stem_rest) or p.stem)
     track = _parse_tracknum(tags.get("track")) or num
 
@@ -273,6 +286,7 @@ def _scan_audio(root, p, rel):
             " ".join([tags.get("author") or "", tags.get("book") or "",
                       tags.get("title") or ""])),
         "has_art": _audio_has_art(p),
+        "sources": {"author": author_src, "title": title_src},
         # Raw tag values for folder-as-book grouping (most common
         # album/author across chapters wins). Stripped out by the
         # grouping step; never stored in the database.
@@ -283,6 +297,8 @@ def _scan_audio(root, p, rel):
 
 def _scan_ebook(root, p, rel):
     meta = read_ebook_meta(p)
+    author_src = "embedded tags" if meta.get("author") else "none"
+    title_src = "embedded tags" if meta.get("title") else "filename"
     author = clean_name(meta.get("author") or "Unknown Author")
     book = clean_name(meta.get("title") or _prettify(p.stem))
     return {
@@ -300,6 +316,7 @@ def _scan_ebook(root, p, rel):
         "translit": looks_transliterated(
             " ".join([meta.get("author") or "", meta.get("title") or ""])),
         "has_art": bool(meta.get("has_cover")),
+        "sources": {"author": author_src, "title": title_src},
     }
 
 
@@ -308,7 +325,8 @@ def scan(root, group_root=False):
 
     Returns one dict per *book*: a folder of chapter audio files is a
     single book (see backend.grouping). Each book dict carries a
-    ``chapters`` list with one entry per file.
+    ``chapters`` list with one entry per file, plus a ``sources`` dict
+    recording where the author/title guesses came from.
     """
     from .grouping import group_items  # local import: keeps import light
     root = Path(root).expanduser().resolve()
@@ -331,7 +349,11 @@ def scan(root, group_root=False):
 # --------------------------------------------------------------------------
 
 def scan_stats(items):
-    """Statistics over book dicts (as returned by scan() or the DB)."""
+    """Statistics over book dicts (as returned by scan()).
+
+    NOTE: v2 has no organizer step, so there is no filing preview here -
+    the intake flow plans filing per book with user confirmation.
+    """
     formats = {}
     languages = {}
     chapters = 0
@@ -346,10 +368,6 @@ def scan_stats(items):
     review = [it for it in items
               if not it["has_tags"] and it["author"] == "Unknown Author"]
 
-    from .organize import build_plan  # local import: no cycle at call time
-    plan = build_plan(items)
-    preview = [(src, dst) for src, dst in plan[:15]]
-
     return {
         "total": len(items),
         "chapters": chapters,
@@ -361,6 +379,4 @@ def scan_stats(items):
         "suspects": suspects,
         "review": sorted(review, key=lambda x: x["rel"])[:50],
         "review_total": len(review),
-        "preview": preview,
-        "preview_total": len(plan),
     }

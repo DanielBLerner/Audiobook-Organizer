@@ -1,14 +1,21 @@
-"""Duplicate detection.
+"""Duplicate detection for the intake flow.
 
-find_duplicates(items) -> {'exact': [...], 'near': [...]}
-  exact: groups of items that are byte-identical files (size + sha256).
-  near:  groups of items with the same author+title but different files
-         (e.g. the same book in MP3 and M4B, or two rips).
+check_new_book(new_book, db) -> {"meta": [...], "exact": [...]}
 
-Hashing is done here (not during scan) so plain scans stay fast.
+  meta:  database books whose normalized (author, title) match the new
+         book's. Normalization = lowercase, strip, remove all
+         punctuation, collapse extra whitespace. Each entry is the db
+         book dict.
+  exact: for each chapter path in the new book, the SHA-256 is computed
+         and looked up with db.find_chapter_by_hash(). Each hit is
+         {"new_path": ..., "book": db_book_dict, "chapter": db_chapter_dict}.
+
+Hashing a new book's chapters is done here (at check time), not during
+scan, so plain scans stay fast.
 """
 
 import hashlib
+import re
 from pathlib import Path
 
 
@@ -23,59 +30,38 @@ def _sha256(path, chunk=1024 * 1024):
     return h.hexdigest()
 
 
-def find_duplicates(items):
-    exact_groups = []
-    near_groups = []
+def _norm(s):
+    """Lowercase, strip, remove all punctuation, collapse whitespace."""
+    s = (s or "").lower()
+    s = re.sub(r"[^\w\s]", "", s, flags=re.UNICODE)
+    return re.sub(r"\s+", " ", s).strip()
 
-    # Exact: same size + same sha256, compared chapter-file by
-    # chapter-file (a book is its chapters).
-    flat = []
-    for it in items:
-        chapters = it.get("chapters") or []
-        if chapters:
-            for ch in chapters:
-                flat.append({"path": ch["path"], "rel": ch["rel"],
-                             "author": it["author"], "book": it["book"]})
-        else:
-            flat.append(it)
 
-    by_size = {}
-    for it in flat:
+def check_new_book(new_book, db):
+    """Compare a scanned book dict against the library database.
+
+    new_book: a book dict as returned by scan() (keys: author, book,
+    chapters -> [{path, ...}]). db: a LibraryDB instance.
+    """
+    key = (_norm(new_book.get("author")), _norm(new_book.get("book")))
+    meta = [b for b in db.list_books()
+            if (_norm(b.get("author")), _norm(b.get("title"))) == key]
+
+    exact = []
+    seen = set()
+    for ch in new_book.get("chapters") or []:
+        new_path = ch.get("path")
+        if not new_path or new_path in seen:
+            continue
+        seen.add(new_path)
         try:
-            size = Path(it["path"]).stat().st_size
+            digest = _sha256(new_path)
         except OSError:
             continue
-        by_size.setdefault(size, []).append(it)
-
-    for size, group in by_size.items():
-        if len(group) < 2:
-            continue
-        by_hash = {}
-        for it in group:
-            try:
-                digest = _sha256(it["path"])
-            except OSError:
-                continue
-            by_hash.setdefault(digest, []).append(it)
-        for digest, dupes in by_hash.items():
-            if len(dupes) > 1:
-                exact_groups.append(dupes)
-
-    # Near: same normalized author+book on distinct books (e.g. the
-    # same book in MP3 and M4B, or two rips). Compared at book level
-    # so a folder-book's own chapters never flag as near-duplicates
-    # of each other.
-    by_book = {}
-    for it in items:
-        key = (it["author"].strip().lower(), it["book"].strip().lower())
-        by_book.setdefault(key, []).append(it)
-    for key, group in by_book.items():
-        paths = {it["path"] for it in group}
-        if len(paths) > 1:
-            # skip groups already fully covered by an exact group
-            near_groups.append(sorted(group, key=lambda x: x["rel"]))
-
-    exact_groups.sort(key=lambda g: g[0]["rel"])
-    near_groups.sort(key=lambda g: (g[0]["author"].lower(),
-                                    g[0]["book"].lower()))
-    return {"exact": exact_groups, "near": near_groups}
+        hit = db.find_chapter_by_hash(digest)
+        if hit:
+            book_dict, chapter_dict = hit
+            exact.append({"new_path": new_path,
+                          "book": book_dict,
+                          "chapter": chapter_dict})
+    return {"meta": meta, "exact": exact}

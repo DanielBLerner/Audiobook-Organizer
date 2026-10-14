@@ -1,27 +1,37 @@
-# Audiobook Organizer
+# AudiobookOrganizer v2
 
-A small Windows desktop app that tames a messy audiobook/ebook library:
-it scans your folders (without touching anything), shows you what's in
-there, lets you fix titles, tags and cover art, preview audio, find
-duplicates, and — only when you say so — reorganizes everything into
-neat `Author / Book / NN - Title` folders, with undo.
+A small Windows desktop app for building an organized, searchable
+audiobook/ebook library **one book at a time**. You bring in a book,
+fix its title/author/tags/cover, and file it into your clean library —
+the app never bulk-reorganizes anything and never changes a file without
+your explicit confirmation.
 
-Built for a library with transliterated Russian names, mojibake
-filenames, and mixed formats (MP3, M4B, FLAC, OGG, EPUB, PDF, FB2, …).
+## Get the app (no Python needed)
 
-## Option A — download the .exe (no Python needed)
+1. Create a GitHub repo and upload these files to it. (If the repo's
+   Actions tab shows a "get started" page instead of your build, the
+   hidden `.github` folder didn't upload — create
+   `.github/workflows/build.yml` in the repo manually and paste in the
+   file from here.)
+2. Make sure the repo's **Settings → Actions → General → Workflow
+   permissions** is set to **Read and write**.
+3. Go to **Releases → Create a new release**, create tag `v1.0.0`
+   (or any `v*` tag), and publish. GitHub builds the `.exe`
+   automatically (~5–10 minutes).
+4. Download `AudiobookOrganizer.exe` from the release and double-click
+   it. That's it — no install, no terminal.
 
-1. Create a GitHub repo named **audiobook-organizer** and push these files to it.
-2. Tag the release and push the tag:
-   ```
-   git tag v1.0.0
-   git push origin v1.0.0
-   ```
-   GitHub Actions builds the Windows `.exe` automatically.
-3. Go to the repo's **Releases** page and download `AudiobookOrganizer.exe`.
-4. Double-click it. That's it — no install, no terminal.
+On first launch the app asks where your clean library should live
+(sensible default pre-filled), whether filing moves or copies files,
+and shows the naming pattern. Your library database lives *inside*
+your library folder (`.audiobook_organizer/library.db`), so updating
+the app can never wipe it.
 
-## Option B — run from source
+**Note:** Windows SmartScreen may warn about the download because the
+`.exe` isn't code-signed. That's expected for a self-built app — click
+"More info" → "Run anyway".
+
+## Run from source
 
 You need Python 3.12 on Windows.
 
@@ -30,37 +40,33 @@ py -3.12 -m pip install -r requirements.txt
 py -3.12 main.py
 ```
 
-## How each feature works
+## How it works
 
-- **Library tab** — every book the app has ever scanned, with cover
-  thumbnails. Search by title/author, filter by tag, sort by clicking a
-  column header or with the sort control. Drag a folder onto the window
-  (or use *Import folder*) to scan it in; scanning only reads files.
-- **Report tab** — format and language breakdowns, how many files have
-  tags or mojibake in the name, a list of transliterated-Russian
-  suspects (*flagged for review — never auto-renamed*), files that need
-  review, and a preview of the first 15 planned moves.
-- **Duplicates tab** — groups of byte-identical files, and groups that
-  are the same author + book in different files. Expand a group to see
-  the paths. The app never deletes anything; you decide what to do.
-- **Detail panel** (right side of the Library tab) — view/replace cover
-  art, edit the title and author, edit comma-separated tags, preview
-  audio for audiobooks, and see the file path, format, language, date
-  added, and flags.
-- **Organize tab** — full preview table of current path → new path. The
-  **Confirm & Organize** button asks "Move N files? This can be undone."
-  first, and only moves after you say yes. Every run writes an undo log;
-  **Undo last** moves the files back.
+- **Add tab** — drag in a folder (or Browse). Three screens:
+  1. *Book details:* cover (never stretched), tags with autocomplete,
+     Title/Author/Series fields. Blue outline = the app's guess, gray =
+     empty, green = edited by you. Flags like **transliterated?** appear
+     under the field; they never change anything on their own.
+  2. *Chapters:* reorder by dragging, preview any chapter by ear.
+  3. *Review & file:* summary, duplicate warnings (same author+title
+     already in your library, or byte-identical files), and a preview
+     of exactly where every file will go
+     (`Library/Author/Series/Book/001 - Chapter 1.mp3`). One
+     "Add to library" button with a confirmation. Files are then moved
+     into your library. One-way — no undo.
+- **Library tab** — search by title/author/series, filter by tags, sort
+  by date added/title/author. Click a row to open the book's folder;
+  click **⋮** to edit (same layout as the Add page, with Back / Save
+  Changes / Delete). Delete asks "Are you sure?" and moves the files to
+  the Recycle Bin — recoverable, not permanent.
 
 ## Honest limitations
 
-- Cover-art editing is unsupported for WMA, WAV, PDF, MOBI, AZW3, and
-  FB2 files — the app will tell you so instead of failing silently.
-  Supported: MP3, M4B/M4A, FLAC, OGG/Opus, EPUB.
-- The title/author **Save** button writes into the file's embedded tags
-  for audiobooks and EPUBs only; for other formats it updates the
-  library database and tells you the file itself was left alone.
-- Metadata edits (titles, tags, covers) are **not** covered by the
-  organize undo log — undo reverses file *moves* only.
-- The app never converts audio formats, and nothing is renamed, moved,
-  or deleted without your explicit confirmation.
+- Cover-art editing is supported for MP3, M4B/M4A, FLAC, OGG/Opus, and
+  EPUB only; other formats tell you so instead of failing silently.
+- The app never converts audio formats.
+- Transliterated Russian titles are flagged for your review; the app
+  never renames them on its own — you type the Cyrillic.
+- If the app ever crashes on startup, it writes
+  `AudiobookOrganizer-crash.log` next to the `.exe` — share that file
+  when reporting the problem.

@@ -1,376 +1,278 @@
-"""SQLite library database.
+"""SQLite library database (v2 schema).
 
-Stores one row per *book*: scan metadata, free-text tags, the date
-it was added (auto-stamped on first import), chapter count, and an
-optional cover-art image path (a cached copy, so the library view stays
-fast even if the book files move).
+Robustness rule (a crash on launch is unacceptable): _migrate()
+inspects EVERY table with PRAGMA table_info and ALTER TABLE ...
+ADD COLUMN for each expected column that is missing. The schema is
+never trusted from CREATE TABLE IF NOT EXISTS alone.
 
-A book's files live in the ``chapters`` table - one row per chapter
-file, in chapter order. A single-file book is just a book with one
-chapter.
+Tables:
+  books    (id, title, author, series DEFAULT '', date_added, cover_path,
+            library_path, chapter_count DEFAULT 1)
+  chapters (id, book_id FK, path UNIQUE, rel, title, track, ext,
+            position DEFAULT 0, sha256)
+  tags     (book_id, tag, PK(book_id, tag))
+  + index on chapters(sha256)
 
-Schema:
-    books(id, path UNIQUE, rel, kind, ext, author, book, title, track,
-          lang, has_tags, mojibake, translit, has_art, date_added,
-          cover_path, chapter_count)
-    chapters(id, book_id, path UNIQUE, rel, title, track, ext, position)
-    tags(book_id, tag)   -- one row per tag
-
-For a folder-book, books.path is the book's folder; for a single-file
-book it is the file itself.
+All methods are thread-safe via an RLock. delete_book() removes the
+book, its chapters and tags - the actual files are handled by the
+caller (moved to the Windows Recycle Bin by the GUI).
 """
 
+import datetime
 import sqlite3
 import threading
-from datetime import date
 from pathlib import Path
 
-BOOK_COLUMNS = ("id", "path", "rel", "kind", "ext", "author", "book",
-                "title", "track", "lang", "has_tags", "mojibake",
-                "translit", "has_art", "date_added", "cover_path",
-                "chapter_count")
-
-ORDER_COLUMNS = {"title": "title", "author": "author", "book": "book",
-                 "date_added": "date_added", "kind": "kind", "lang": "lang"}
+EXPECTED_COLUMNS = {
+    "books": [
+        ("id", "INTEGER PRIMARY KEY"),
+        ("title", "TEXT"),
+        ("author", "TEXT"),
+        ("series", "TEXT DEFAULT ''"),
+        ("date_added", "TEXT"),
+        ("cover_path", "TEXT"),
+        ("library_path", "TEXT"),
+        ("chapter_count", "INTEGER DEFAULT 1"),
+    ],
+    "chapters": [
+        ("id", "INTEGER PRIMARY KEY"),
+        ("book_id", "INTEGER"),
+        ("path", "TEXT UNIQUE"),
+        ("rel", "TEXT"),
+        ("title", "TEXT"),
+        ("track", "TEXT"),
+        ("ext", "TEXT"),
+        ("position", "INTEGER DEFAULT 0"),
+        ("sha256", "TEXT"),
+    ],
+    "tags": [
+        ("book_id", "INTEGER"),
+        ("tag", "TEXT"),
+    ],
+}
 
 
 class LibraryDB:
     def __init__(self, db_path):
-        self.db_path = str(db_path)
-        Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
-        self._conn = sqlite3.connect(self.db_path,
-                                     check_same_thread=False)
+        self.path = str(db_path)
+        Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+        self._conn = sqlite3.connect(self.path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
-        self._init_schema()
-
-    # -- schema ------------------------------------------------------
-
-    def _init_schema(self):
-        with self._lock, self._conn:
-            self._conn.execute("""
-                CREATE TABLE IF NOT EXISTS books (
-                    id INTEGER PRIMARY KEY,
-                    path TEXT UNIQUE NOT NULL,
-                    rel TEXT,
-                    kind TEXT,
-                    ext TEXT,
-                    author TEXT,
-                    book TEXT,
-                    title TEXT,
-                    track TEXT,
-                    lang TEXT,
-                    has_tags INTEGER DEFAULT 0,
-                    mojibake INTEGER DEFAULT 0,
-                    translit INTEGER DEFAULT 0,
-                    has_art INTEGER DEFAULT 0,
-                    date_added TEXT,
-                    cover_path TEXT,
-                    chapter_count INTEGER DEFAULT 1
-                )""")
-            self._conn.execute("""
-                CREATE TABLE IF NOT EXISTS chapters (
-                    id INTEGER PRIMARY KEY,
-                    book_id INTEGER NOT NULL,
-                    path TEXT UNIQUE NOT NULL,
-                    rel TEXT,
-                    title TEXT,
-                    track TEXT,
-                    ext TEXT,
-                    position INTEGER DEFAULT 0,
-                    FOREIGN KEY (book_id) REFERENCES books(id)
-                )""")
-            self._conn.execute("""
-                CREATE TABLE IF NOT EXISTS tags (
-                    book_id INTEGER NOT NULL,
-                    tag TEXT NOT NULL,
-                    PRIMARY KEY (book_id, tag),
-                    FOREIGN KEY (book_id) REFERENCES books(id)
-                        ON DELETE CASCADE
-                )""")
-            self._conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_tags_tag ON tags(tag)")
-            self._conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_chapters_book "
-                "ON chapters(book_id)")
-
-    # -- import ------------------------------------------------------
-
-    def import_items(self, items):
-        """Upsert scanned books. New rows get today's date_added.
-        Chapters are synced per book (added/updated/removed).
-        Returns the number of newly added books."""
-        today = date.today().isoformat()
-        new = 0
-        with self._lock, self._conn:
-            for it in items:
-                chapters = it.get("chapters") or []
-                cur = self._conn.execute(
-                    "SELECT id FROM books WHERE path = ?", (it["path"],))
-                row = cur.fetchone()
-                if row is None:
-                    cur = self._conn.execute("""
-                        INSERT INTO books
-                        (path, rel, kind, ext, author, book, title, track,
-                         lang, has_tags, mojibake, translit, has_art,
-                         date_added, chapter_count)
-                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                        (it["path"], it["rel"], it["kind"], it["ext"],
-                         it["author"], it["book"], it["title"], it["track"],
-                         it["lang"], int(it["has_tags"]),
-                         int(it["mojibake"]), int(it["translit"]),
-                         int(it["has_art"]), today, len(chapters) or 1))
-                    book_id = cur.lastrowid
-                    new += 1
-                else:
-                    book_id = row["id"]
-                    self._conn.execute("""
-                        UPDATE books SET rel=?, kind=?, ext=?, author=?,
-                            book=?, title=?, track=?, lang=?, has_tags=?,
-                            mojibake=?, translit=?, has_art=?,
-                            chapter_count=?
-                        WHERE id=?""",
-                        (it["rel"], it["kind"], it["ext"], it["author"],
-                         it["book"], it["title"], it["track"], it["lang"],
-                         int(it["has_tags"]), int(it["mojibake"]),
-                         int(it["translit"]), int(it["has_art"]),
-                         len(chapters) or 1, book_id))
-                # Fold in stale per-file rows from before folder
-                # grouping existed (their tags are merged, not lost).
-                if chapters:
-                    self._absorb_stale_rows(
-                        book_id, [c["path"] for c in chapters])
-                self._sync_chapters(book_id, chapters)
-        return new
-
-    def _absorb_stale_rows(self, book_id, chapter_paths):
-        """Delete old per-file book rows now covered by a folder-book's
-        chapters, merging their tags into the folder-book."""
-        placeholders = ",".join("?" for _ in chapter_paths)
-        rows = self._conn.execute(
-            f"SELECT id FROM books WHERE path IN ({placeholders}) "
-            f"AND id != ?", (*chapter_paths, book_id)).fetchall()
-        if not rows:
-            return
-        merged = set(self.get_tags(book_id))
-        for r in rows:
-            merged.update(self.get_tags(r["id"]))
-            self._conn.execute("DELETE FROM chapters WHERE book_id = ?",
-                               (r["id"],))
-            self._conn.execute("DELETE FROM tags WHERE book_id = ?",
-                               (r["id"],))
-            self._conn.execute("DELETE FROM books WHERE id = ?", (r["id"],))
-        self.set_tags(book_id, sorted(merged))
-
-    def _sync_chapters(self, book_id, chapters):
-        """Make the chapters table match the scanned chapter list."""
-        existing = {r["path"]: r["id"] for r in self._conn.execute(
-            "SELECT id, path FROM chapters WHERE book_id = ?",
-            (book_id,)).fetchall()}
-        seen = set()
-        for pos, ch in enumerate(chapters):
-            seen.add(ch["path"])
-            if ch["path"] in existing:
-                self._conn.execute("""
-                    UPDATE chapters SET rel=?, title=?, track=?, ext=?,
-                        position=? WHERE id=?""",
-                    (ch["rel"], ch["title"], ch["track"], ch["ext"],
-                     pos, existing[ch["path"]]))
-            else:
-                self._conn.execute("""
-                    INSERT INTO chapters
-                    (book_id, path, rel, title, track, ext, position)
-                    VALUES (?,?,?,?,?,?,?)""",
-                    (book_id, ch["path"], ch["rel"], ch["title"],
-                     ch["track"], ch["ext"], pos))
-        if seen:
-            self._conn.execute(
-                f"""DELETE FROM chapters WHERE book_id = ?
-                    AND path NOT IN ({','.join('?' for _ in seen)})""",
-                (book_id, *seen))
-
-    # -- reading -----------------------------------------------------
-
-    def _get_chapters(self, book_id, book):
-        rows = self._conn.execute(
-            """SELECT path, rel, title, track, ext FROM chapters
-               WHERE book_id = ? ORDER BY position, id""",
-            (book_id,)).fetchall()
-        chapters = [dict(r) for r in rows]
-        if not chapters and book.get("path"):
-            # Legacy row from before chapter tracking: the book's own
-            # path is its single chapter.
-            chapters = [{
-                "path": book["path"], "rel": book.get("rel") or "",
-                "title": book.get("title") or "",
-                "track": book.get("track") or "",
-                "ext": book.get("ext") or "",
-            }]
-        return chapters
-
-    def _row_to_dict(self, row):
-        d = {c: row[c] for c in BOOK_COLUMNS}
-        for flag in ("has_tags", "mojibake", "translit", "has_art"):
-            d[flag] = bool(d[flag])
-        d["chapter_count"] = d.get("chapter_count") or 1
-        d["chapters"] = self._get_chapters(d["id"], d)
-        d["tags"] = self.get_tags(d["id"])
-        return d
-
-    def list_books(self, search="", tag="", order_by="title",
-                   order_desc=False):
-        """Books matching search text and/or tag, sorted for the library."""
-        order_col = ORDER_COLUMNS.get(order_by, "title")
-        direction = "DESC" if order_desc else "ASC"
-        sql = ("SELECT b.* FROM books b")
-        params = []
-        clauses = []
-        if tag:
-            sql += " JOIN tags t ON t.book_id = b.id"
-            clauses.append("t.tag = ?")
-            params.append(tag)
-        if search:
-            like = f"%{search}%"
-            clauses.append(
-                "(b.title LIKE ? OR b.author LIKE ? OR b.book LIKE ?)")
-            params += [like, like, like]
-        if clauses:
-            sql += " WHERE " + " AND ".join(clauses)
-        # NULL/empty titles sort last-ish; keep it simple and predictable.
-        sql += f" ORDER BY {order_col} COLLATE NOCASE {direction}"
+        self._conn.execute("PRAGMA journal_mode=WAL")
         with self._lock:
-            rows = self._conn.execute(sql, params).fetchall()
-            return [self._row_to_dict(r) for r in rows]
+            self._migrate()
+
+    # ------------------------------------------------------------------
+    # Migration
+    # ------------------------------------------------------------------
+
+    def _migrate(self):
+        cur = self._conn.cursor()
+        for table, columns in EXPECTED_COLUMNS.items():
+            cur.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+                (table,))
+            exists = cur.fetchone() is not None
+            if not exists:
+                cols = ", ".join(f"{name} {dtype}" for name, dtype in columns)
+                cur.execute(f"CREATE TABLE {table} ({cols})")
+            else:
+                cur.execute(f"PRAGMA table_info({table})")
+                present = {row["name"] for row in cur.fetchall()}
+                for name, dtype in columns:
+                    if name not in present:
+                        cur.execute(
+                            f"ALTER TABLE {table} ADD COLUMN {name} {dtype}")
+            if table == "tags":
+                # tags needs the composite PK; recreate only if it is
+                # missing entirely (a plain CREATE without PK is fine
+                # functionally, but redo it right).
+                cur.execute(f"PRAGMA table_info({table})")
+                info = {row["name"]: row["pk"] for row in cur.fetchall()}
+                if info.get("book_id") != 1 or info.get("tag") != 2:
+                    cur.execute("ALTER TABLE tags RENAME TO _tags_old")
+                    cur.execute(
+                        "CREATE TABLE tags (book_id INTEGER, tag TEXT, "
+                        "PRIMARY KEY (book_id, tag))")
+                    cur.execute(
+                        "INSERT OR IGNORE INTO tags (book_id, tag) "
+                        "SELECT book_id, tag FROM _tags_old")
+                    cur.execute("DROP TABLE _tags_old")
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_chapters_sha256 "
+            "ON chapters(sha256)")
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_chapters_book "
+            "ON chapters(book_id)")
+        self._conn.commit()
+
+    # ------------------------------------------------------------------
+    # Writes
+    # ------------------------------------------------------------------
+
+    def file_book(self, book, chapters, tags, cover_path, library_dir,
+                  fingerprints):
+        """Store a filed book. Returns the new book id.
+
+        book:         {title, author, series}
+        chapters:     ordered list of {path (final abs path), rel,
+                      title, track, ext}
+        tags:         list of tag strings
+        cover_path:   absolute path of the cover art, or None
+        library_dir:  absolute path of the book's folder in the library
+        fingerprints: {path: sha256}
+        Stamps date_added with today's ISO date.
+        """
+        with self._lock:
+            cur = self._conn.cursor()
+            today = datetime.date.today().isoformat()
+            cur.execute(
+                "INSERT INTO books (title, author, series, date_added, "
+                "cover_path, library_path, chapter_count) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (book.get("title") or "", book.get("author") or "",
+                 book.get("series") or "", today, cover_path,
+                 str(library_dir), len(chapters)))
+            book_id = cur.lastrowid
+            for pos, ch in enumerate(chapters):
+                path = str(ch.get("path") or "")
+                cur.execute(
+                    "INSERT OR REPLACE INTO chapters "
+                    "(book_id, path, rel, title, track, ext, position, "
+                    "sha256) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (book_id, path, ch.get("rel") or "",
+                     ch.get("title") or "", ch.get("track") or "",
+                     ch.get("ext") or "", pos,
+                     (fingerprints or {}).get(path)))
+            for tag in tags or []:
+                if tag and str(tag).strip():
+                    cur.execute(
+                        "INSERT OR IGNORE INTO tags (book_id, tag) "
+                        "VALUES (?, ?)",
+                        (book_id, str(tag).strip()))
+            self._conn.commit()
+            return book_id
+
+    def update_book(self, book_id, title, author, series, tags, cover_path):
+        with self._lock:
+            cur = self._conn.cursor()
+            cur.execute(
+                "UPDATE books SET title=?, author=?, series=?, "
+                "cover_path=? WHERE id=?",
+                (title or "", author or "", series or "", cover_path,
+                 book_id))
+            cur.execute("DELETE FROM tags WHERE book_id=?", (book_id,))
+            for tag in tags or []:
+                if tag and str(tag).strip():
+                    cur.execute(
+                        "INSERT OR IGNORE INTO tags (book_id, tag) "
+                        "VALUES (?, ?)", (book_id, str(tag).strip()))
+            self._conn.commit()
+
+    def update_chapter_order(self, book_id, ordered_chapter_ids):
+        with self._lock:
+            cur = self._conn.cursor()
+            for pos, ch_id in enumerate(ordered_chapter_ids):
+                cur.execute(
+                    "UPDATE chapters SET position=? "
+                    "WHERE id=? AND book_id=?", (pos, ch_id, book_id))
+            self._conn.commit()
+
+    def delete_book(self, book_id):
+        """Delete the book, its chapters and tags (files are the
+        caller's responsibility)."""
+        with self._lock:
+            cur = self._conn.cursor()
+            cur.execute("DELETE FROM chapters WHERE book_id=?", (book_id,))
+            cur.execute("DELETE FROM tags WHERE book_id=?", (book_id,))
+            cur.execute("DELETE FROM books WHERE id=?", (book_id,))
+            self._conn.commit()
+
+    # ------------------------------------------------------------------
+    # Reads
+    # ------------------------------------------------------------------
+
+    def _book_row_to_dict(self, row, cur):
+        book_id = row["id"]
+        cur.execute("SELECT tag FROM tags WHERE book_id=? ORDER BY tag",
+                    (book_id,))
+        tags = [r["tag"] for r in cur.fetchall()]
+        cur.execute("SELECT * FROM chapters WHERE book_id=? "
+                    "ORDER BY position, id", (book_id,))
+        chapters = [dict(r) for r in cur.fetchall()]
+        return {
+            "id": book_id,
+            "title": row["title"] or "",
+            "author": row["author"] or "",
+            "series": row["series"] or "",
+            "tags": tags,
+            "date_added": row["date_added"] or "",
+            "cover_path": row["cover_path"],
+            "library_path": row["library_path"],
+            "chapter_count": row["chapter_count"] or len(chapters),
+            "chapters": chapters,
+        }
+
+    def list_books(self, search="", tag="", order_by="date_added",
+                   order_desc=True):
+        if order_by not in ("date_added", "title", "author"):
+            order_by = "date_added"
+        direction = "DESC" if order_desc else "ASC"
+        with self._lock:
+            cur = self._conn.cursor()
+            sql = "SELECT * FROM books"
+            where, params = [], []
+            if search:
+                where.append(
+                    "(title LIKE ? ESCAPE '\\' OR author LIKE ? ESCAPE '\\' "
+                    "OR series LIKE ? ESCAPE '\\')")
+                like = ("%" + search.replace("\\", "\\\\")
+                        .replace("%", "\\%").replace("_", "\\_") + "%")
+                params.extend([like, like, like])
+            if tag:
+                where.append(
+                    "id IN (SELECT book_id FROM tags WHERE tag=?)")
+                params.append(tag)
+            if where:
+                sql += " WHERE " + " AND ".join(where)
+            # NULLs last for a stable default (date_added DESC) order.
+            sql += (f" ORDER BY {order_by} IS NULL, {order_by} {direction}, "
+                    f"id {direction}")
+            cur.execute(sql, params)
+            return [self._book_row_to_dict(r, cur) for r in cur.fetchall()]
 
     def get_book(self, book_id):
         with self._lock:
-            row = self._conn.execute(
-                "SELECT * FROM books WHERE id = ?", (book_id,)).fetchone()
-            return self._row_to_dict(row) if row else None
-
-    def count(self):
-        with self._lock:
-            return self._conn.execute(
-                "SELECT COUNT(*) AS n FROM books").fetchone()["n"]
-
-    # -- editing -----------------------------------------------------
-
-    def update_metadata(self, book_id, title, author):
-        with self._lock, self._conn:
-            self._conn.execute(
-                "UPDATE books SET title = ?, author = ? WHERE id = ?",
-                (title, author, book_id))
-
-    def set_tags(self, book_id, tags):
-        cleaned = sorted({t.strip() for t in tags if t and t.strip()})
-        with self._lock, self._conn:
-            self._conn.execute("DELETE FROM tags WHERE book_id = ?",
-                               (book_id,))
-            self._conn.executemany(
-                "INSERT INTO tags (book_id, tag) VALUES (?, ?)",
-                [(book_id, t) for t in cleaned])
-
-    def get_tags(self, book_id):
-        with self._lock:
-            rows = self._conn.execute(
-                "SELECT tag FROM tags WHERE book_id = ? ORDER BY tag",
-                (book_id,)).fetchall()
-            return [r["tag"] for r in rows]
+            cur = self._conn.cursor()
+            cur.execute("SELECT * FROM books WHERE id=?", (book_id,))
+            row = cur.fetchone()
+            return self._book_row_to_dict(row, cur) if row else None
 
     def all_tags(self):
         with self._lock:
-            rows = self._conn.execute(
-                "SELECT DISTINCT tag FROM tags ORDER BY tag").fetchall()
-            return [r["tag"] for r in rows]
+            cur = self._conn.cursor()
+            cur.execute("SELECT DISTINCT tag FROM tags ORDER BY tag")
+            return [r["tag"] for r in cur.fetchall()]
 
-    def set_cover(self, book_id, cover_path):
-        with self._lock, self._conn:
-            self._conn.execute(
-                "UPDATE books SET cover_path = ?, has_art = 1 WHERE id = ?",
-                (cover_path, book_id))
-
-    def set_location(self, book_id, path, rel):
-        """Update a book's own path/rel (e.g. after organize moved its
-        chapters into a new folder)."""
-        with self._lock, self._conn:
-            self._conn.execute(
-                "UPDATE books SET path = ?, rel = ? WHERE id = ?",
-                (path, rel, book_id))
-
-    def mark_moved(self, old_path, new_path, new_rel):
-        """Record a chapter file move (organize/undo).
-
-        Returns the affected book id, or None when the path isn't
-        tracked. Chapters move individually; the caller refreshes the
-        book's own location with set_location() afterwards.
-        """
-        with self._lock, self._conn:
-            ch = self._conn.execute(
-                "SELECT id, book_id FROM chapters WHERE path = ?",
-                (old_path,)).fetchone()
-            if ch is not None:
-                self._conn.execute(
-                    "UPDATE chapters SET path = ?, rel = ? WHERE id = ?",
-                    (new_path, new_rel, ch["id"]))
-                return ch["book_id"]
-            b = self._conn.execute(
-                "SELECT id FROM books WHERE path = ?", (old_path,)).fetchone()
-            if b is not None:
-                self._conn.execute(
-                    "UPDATE books SET path = ?, rel = ? WHERE id = ?",
-                    (new_path, new_rel, b["id"]))
-                return b["id"]
-        return None
-
-    def find_by_path(self, path):
-        """Find the book owning a chapter file path (or a book path)."""
+    def find_chapter_by_hash(self, sha256):
+        """Return (book_dict, chapter_dict) for the chapter with this
+        SHA-256, or None."""
+        if not sha256:
+            return None
         with self._lock:
-            row = self._conn.execute(
-                """SELECT b.* FROM books b
-                   JOIN chapters c ON c.book_id = b.id
-                   WHERE c.path = ?""", (path,)).fetchone()
+            cur = self._conn.cursor()
+            cur.execute("SELECT * FROM chapters WHERE sha256=?", (sha256,))
+            row = cur.fetchone()
             if row is None:
-                row = self._conn.execute(
-                    "SELECT * FROM books WHERE path = ?", (path,)).fetchone()
-            return self._row_to_dict(row) if row else None
-
-    def prune_missing(self):
-        """Drop books whose files no longer exist.
-
-        A book survives while at least one chapter file exists;
-        individually-missing chapters are dropped. Returns the number
-        of books removed."""
-        removed = 0
-        with self._lock, self._conn:
-            books = self._conn.execute(
-                "SELECT id, path FROM books").fetchall()
-            for b in books:
-                chs = self._conn.execute(
-                    "SELECT id, path FROM chapters WHERE book_id = ?",
-                    (b["id"],)).fetchall()
-                if chs:
-                    alive = [c for c in chs if Path(c["path"]).exists()]
-                    for c in chs:
-                        if not Path(c["path"]).exists():
-                            self._conn.execute(
-                                "DELETE FROM chapters WHERE id = ?",
-                                (c["id"],))
-                    if alive:
-                        self._conn.execute(
-                            "UPDATE books SET chapter_count = ? WHERE id = ?",
-                            (len(alive), b["id"]))
-                        continue
-                elif Path(b["path"]).exists():
-                    continue  # legacy single-file row, file still there
-                self._conn.execute("DELETE FROM chapters WHERE book_id = ?",
-                                   (b["id"],))
-                self._conn.execute("DELETE FROM tags WHERE book_id = ?",
-                                   (b["id"],))
-                self._conn.execute("DELETE FROM books WHERE id = ?",
-                                   (b["id"],))
-                removed += 1
-        return removed
+                return None
+            cur.execute("SELECT * FROM books WHERE id=?", (row["book_id"],))
+            brow = cur.fetchone()
+            if brow is None:
+                return None
+            return self._book_row_to_dict(brow, cur), dict(row)
 
     def close(self):
         with self._lock:
+            self._conn.commit()
             self._conn.close()
