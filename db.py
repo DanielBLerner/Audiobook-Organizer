@@ -11,6 +11,8 @@ Tables:
   chapters (id, book_id FK, path UNIQUE, rel, title, track, ext,
             position DEFAULT 0, sha256)
   tags     (book_id, tag, PK(book_id, tag))
+  tag_meta (tag PK, color, hidden DEFAULT 0)  -- tag identity: bubble
+            color (hex) and the "hide tag" flag. Tags are never deleted.
   + index on chapters(sha256)
 
 All methods are thread-safe via an RLock. delete_book() removes the
@@ -22,6 +24,8 @@ import datetime
 import sqlite3
 import threading
 from pathlib import Path
+
+DEFAULT_TAG_COLOR = "#4aa3ff"
 
 EXPECTED_COLUMNS = {
     "books": [
@@ -48,6 +52,11 @@ EXPECTED_COLUMNS = {
     "tags": [
         ("book_id", "INTEGER"),
         ("tag", "TEXT"),
+    ],
+    "tag_meta": [
+        ("tag", "TEXT PRIMARY KEY"),
+        ("color", "TEXT"),
+        ("hidden", "INTEGER DEFAULT 0"),
     ],
 }
 
@@ -105,6 +114,12 @@ class LibraryDB:
         cur.execute(
             "CREATE INDEX IF NOT EXISTS idx_chapters_book "
             "ON chapters(book_id)")
+        # Backfill tag_meta for tags assigned before tag metadata
+        # existed (databases from before Addendum B).
+        cur.execute(
+            "INSERT OR IGNORE INTO tag_meta (tag, color, hidden) "
+            "SELECT DISTINCT tag, ?, 0 FROM tags",
+            (DEFAULT_TAG_COLOR,))
         self._conn.commit()
 
     # ------------------------------------------------------------------
@@ -112,7 +127,7 @@ class LibraryDB:
     # ------------------------------------------------------------------
 
     def file_book(self, book, chapters, tags, cover_path, library_dir,
-                  fingerprints):
+                  fingerprints, date_added=None):
         """Store a filed book. Returns the new book id.
 
         book:         {title, author, series}
@@ -122,7 +137,9 @@ class LibraryDB:
         cover_path:   absolute path of the cover art, or None
         library_dir:  absolute path of the book's folder in the library
         fingerprints: {path: sha256}
-        Stamps date_added with today's ISO date.
+        date_added:   ISO date string; defaults to today when omitted
+                      (Addendum A: the value comes from the Add page's
+                      Date field so books can be backdated).
         """
         with self._lock:
             cur = self._conn.cursor()
@@ -132,7 +149,7 @@ class LibraryDB:
                 "cover_path, library_path, chapter_count) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (book.get("title") or "", book.get("author") or "",
-                 book.get("series") or "", today, cover_path,
+                 book.get("series") or "", date_added or today, cover_path,
                  str(library_dir), len(chapters)))
             book_id = cur.lastrowid
             for pos, ch in enumerate(chapters):
@@ -152,16 +169,27 @@ class LibraryDB:
                         "VALUES (?, ?)",
                         (book_id, str(tag).strip()))
             self._conn.commit()
+            for tag in tags or []:
+                if tag and str(tag).strip():
+                    self.ensure_tag_meta(str(tag).strip())
             return book_id
 
-    def update_book(self, book_id, title, author, series, tags, cover_path):
+    def update_book(self, book_id, title, author, series, tags, cover_path,
+                    date_added=None):
         with self._lock:
             cur = self._conn.cursor()
-            cur.execute(
-                "UPDATE books SET title=?, author=?, series=?, "
-                "cover_path=? WHERE id=?",
-                (title or "", author or "", series or "", cover_path,
-                 book_id))
+            if date_added:
+                cur.execute(
+                    "UPDATE books SET title=?, author=?, series=?, "
+                    "cover_path=?, date_added=? WHERE id=?",
+                    (title or "", author or "", series or "", cover_path,
+                     date_added, book_id))
+            else:
+                cur.execute(
+                    "UPDATE books SET title=?, author=?, series=?, "
+                    "cover_path=? WHERE id=?",
+                    (title or "", author or "", series or "", cover_path,
+                     book_id))
             cur.execute("DELETE FROM tags WHERE book_id=?", (book_id,))
             for tag in tags or []:
                 if tag and str(tag).strip():
@@ -169,6 +197,9 @@ class LibraryDB:
                         "INSERT OR IGNORE INTO tags (book_id, tag) "
                         "VALUES (?, ?)", (book_id, str(tag).strip()))
             self._conn.commit()
+            for tag in tags or []:
+                if tag and str(tag).strip():
+                    self.ensure_tag_meta(str(tag).strip())
 
     def update_chapter_order(self, book_id, ordered_chapter_ids):
         with self._lock:
@@ -254,6 +285,119 @@ class LibraryDB:
             cur = self._conn.cursor()
             cur.execute("SELECT DISTINCT tag FROM tags ORDER BY tag")
             return [r["tag"] for r in cur.fetchall()]
+
+    # ------------------------------------------------------------------
+    # Tag metadata (Addendum B): color + hidden flag per tag. Tags are
+    # never deleted; "hidden" only removes them from the filter
+    # dropdown and autocomplete.
+    # ------------------------------------------------------------------
+
+    def ensure_tag_meta(self, tag, color=None):
+        """Create a tag_meta row if missing (default color otherwise)."""
+        tag = (tag or "").strip()
+        if not tag:
+            return
+        with self._lock:
+            cur = self._conn.cursor()
+            cur.execute(
+                "INSERT OR IGNORE INTO tag_meta (tag, color, hidden) "
+                "VALUES (?, ?, 0)",
+                (tag, color or DEFAULT_TAG_COLOR))
+            self._conn.commit()
+
+    def get_tag_meta(self, tag):
+        """{'tag', 'color', 'hidden'} or None."""
+        with self._lock:
+            cur = self._conn.cursor()
+            cur.execute("SELECT tag, color, hidden FROM tag_meta "
+                        "WHERE tag=?", ((tag or "").strip(),))
+            row = cur.fetchone()
+            if row is None:
+                return None
+            return {"tag": row["tag"],
+                    "color": row["color"] or DEFAULT_TAG_COLOR,
+                    "hidden": bool(row["hidden"])}
+
+    def all_tag_meta(self):
+        """Every known tag with its color/hidden flag, ordered by tag."""
+        with self._lock:
+            cur = self._conn.cursor()
+            cur.execute("SELECT tag, color, hidden FROM tag_meta "
+                        "ORDER BY tag COLLATE NOCASE")
+            return [{"tag": r["tag"],
+                     "color": r["color"] or DEFAULT_TAG_COLOR,
+                     "hidden": bool(r["hidden"])}
+                    for r in cur.fetchall()]
+
+    def visible_tags(self):
+        """Tag names for the filter dropdown and autocomplete:
+        hidden tags are excluded."""
+        with self._lock:
+            cur = self._conn.cursor()
+            cur.execute("SELECT tag FROM tag_meta "
+                        "WHERE COALESCE(hidden, 0) = 0 "
+                        "ORDER BY tag COLLATE NOCASE")
+            return [r["tag"] for r in cur.fetchall()]
+
+    def set_tag_meta(self, tag, color=None, hidden=None):
+        """Update a tag's color and/or hidden flag (creates the row)."""
+        tag = (tag or "").strip()
+        if not tag:
+            raise ValueError("tag text is empty")
+        with self._lock:
+            self.ensure_tag_meta(tag)
+            cur = self._conn.cursor()
+            if color is not None:
+                cur.execute("UPDATE tag_meta SET color=? WHERE tag=?",
+                            (color, tag))
+            if hidden is not None:
+                cur.execute("UPDATE tag_meta SET hidden=? WHERE tag=?",
+                            (1 if hidden else 0, tag))
+            self._conn.commit()
+
+    def tag_name_taken(self, name, ignore=None):
+        """True if another tag already uses this text
+        (case-insensitive)."""
+        name = (name or "").strip().lower()
+        ignore = (ignore or "").strip().lower()
+        if not name:
+            return False
+        with self._lock:
+            cur = self._conn.cursor()
+            cur.execute("SELECT tag FROM tag_meta")
+            for r in cur.fetchall():
+                t = (r["tag"] or "")
+                if t.lower() == name and t.lower() != ignore:
+                    return True
+            cur.execute("SELECT DISTINCT tag FROM tags")
+            for r in cur.fetchall():
+                t = (r["tag"] or "")
+                if t.lower() == name and t.lower() != ignore:
+                    return True
+        return False
+
+    def rename_tag(self, old_tag, new_tag):
+        """Rename a tag everywhere it is used (books + metadata).
+
+        Raises ValueError when the new name is empty or already taken
+        (case-insensitive) by a different tag.
+        """
+        old_tag = (old_tag or "").strip()
+        new_tag = (new_tag or "").strip()
+        if not new_tag:
+            raise ValueError("tag text is empty")
+        if new_tag.lower() != old_tag.lower() and \
+                self.tag_name_taken(new_tag):
+            raise ValueError("a tag named '%s' already exists" % new_tag)
+        with self._lock:
+            cur = self._conn.cursor()
+            if new_tag != old_tag:
+                cur.execute("UPDATE OR IGNORE tags SET tag=? WHERE tag=?",
+                            (new_tag, old_tag))
+                cur.execute("UPDATE OR IGNORE tag_meta SET tag=? "
+                            "WHERE tag=?", (new_tag, old_tag))
+            self._conn.commit()
+        self.ensure_tag_meta(new_tag)
 
     def find_chapter_by_hash(self, sha256):
         """Return (book_dict, chapter_dict) for the chapter with this

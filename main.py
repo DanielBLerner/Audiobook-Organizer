@@ -65,7 +65,7 @@ def main():
     cfg = config.load()
     if not cfg.get("setup_done") or not cfg.get("library_root"):
         wiz = SetupWizard(cfg)
-        if wiz.exec() != QDialog.Accepted:
+        if wiz.exec() != QDialog.DialogCode.Accepted:
             sys.exit(0)  # user closed setup: quit quietly
         cfg = wiz.result_config()
         config.save(cfg)
