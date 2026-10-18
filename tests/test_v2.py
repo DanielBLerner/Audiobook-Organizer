@@ -24,10 +24,11 @@ from backend import (  # noqa: E402
     extract_cover, set_cover, can_set_cover, CoverError,
     UnsupportedFormatError, check_new_book, plan_destinations,
     execute_plan, fingerprint_paths, FilingError,
+    find_leftovers, remove_empty_dirs,
     fix_mojibake, clean_name, looks_transliterated, guess_language,
 )
 from backend.grouping import group_items  # noqa: E402
-from db import LibraryDB  # noqa: E402
+from db import LibraryDB, DEFAULT_TAG_COLOR  # noqa: E402
 import config  # noqa: E402
 
 PASS = []
@@ -569,8 +570,196 @@ def main():
     check("(f) schema migration", t_migration)
     check("(g) config", t_config)
     check("(extra) covers api", t_covers_api)
+    check("(h) date added backdate", t_date_added)
+    check("(i) tag metadata", t_tag_meta)
+    check("(j) folder cleanup", t_folder_cleanup)
     print(f"\nALL {len(PASS)} TESTS PASSED")
     return 0
+
+
+# --------------------------------------------------------------------------
+# (h) Addendum A: date_added comes from the Date field (backdatable)
+# --------------------------------------------------------------------------
+
+def t_date_added():
+    tmp = Path(tempfile.mkdtemp())
+    db = LibraryDB(tmp / "lib.db")
+
+    def file_dated(title, date):
+        chp = tmp / f"{title}.mp3"
+        make_mp3(chp, "C", "A", "B", 1)
+        fps = fingerprint_paths([str(chp)])
+        return db.file_book(
+            {"title": title, "author": "A", "series": ""},
+            [{"path": str(chp), "rel": "x.mp3", "title": "C",
+              "track": "1", "ext": ".mp3"}],
+            [], None, str(tmp), fps, date_added=date)
+
+    # backdated book keeps its given date
+    id_old = file_dated("oldbook", "2020-05-04")
+    assert db.get_book(id_old)["date_added"] == "2020-05-04"
+
+    # omitted date -> today (the auto-populate behavior)
+    id_new = file_dated("newbook", None)
+    import datetime as _dt
+    assert db.get_book(id_new)["date_added"] == _dt.date.today().isoformat()
+
+    # library sort puts the backdated book in its true chronological place
+    listed = db.list_books(order_by="date_added", order_desc=False)
+    assert [b["title"] for b in listed] == ["oldbook", "newbook"], \
+        [b["title"] for b in listed]
+
+    # the edit page can change the date later
+    db.update_book(id_new, "newbook", "A", "", [], None,
+                   date_added="2019-01-01")
+    assert db.get_book(id_new)["date_added"] == "2019-01-01"
+    # update without a date leaves the stored date alone
+    db.update_book(id_new, "newbook", "A", "", [], None)
+    assert db.get_book(id_new)["date_added"] == "2019-01-01"
+
+    db.close()
+    shutil.rmtree(tmp)
+
+
+# --------------------------------------------------------------------------
+# (i) Addendum B: tag metadata (color, hidden), rename, duplicates,
+#     migration backfill
+# --------------------------------------------------------------------------
+
+def t_tag_meta():
+    tmp = Path(tempfile.mkdtemp())
+    db = LibraryDB(tmp / "lib.db")
+
+    # fresh tag gets the default color, not hidden
+    db.ensure_tag_meta("sci-fi")
+    m = db.get_tag_meta("sci-fi")
+    assert m["color"] == DEFAULT_TAG_COLOR and m["hidden"] is False, m
+
+    # set color + hidden
+    db.set_tag_meta("sci-fi", color="#ff0000", hidden=True)
+    m = db.get_tag_meta("sci-fi")
+    assert m["color"] == "#ff0000" and m["hidden"] is True, m
+
+    # hidden tags are excluded from filter/autocomplete lists...
+    assert "sci-fi" not in db.visible_tags()
+    # ...but still known to the manager
+    assert any(t["tag"] == "sci-fi" and t["hidden"]
+               for t in db.all_tag_meta())
+
+    # un-hide restores
+    db.set_tag_meta("sci-fi", hidden=False)
+    assert "sci-fi" in db.visible_tags()
+
+    # filing a book ensures meta rows for its tags
+    chp = tmp / "c.mp3"
+    make_mp3(chp, "C", "A", "B", 1)
+    fps = fingerprint_paths([str(chp)])
+    bid = db.file_book(
+        {"title": "T", "author": "A", "series": ""},
+        [{"path": str(chp), "rel": "c.mp3", "title": "C",
+          "track": "1", "ext": ".mp3"}],
+        ["sci-fi", "russian"], None, str(tmp), fps)
+    assert db.get_tag_meta("russian")["color"] == DEFAULT_TAG_COLOR
+    assert sorted(db.visible_tags()) == ["russian", "sci-fi"]
+
+    # rename propagates to every book using the tag
+    bid2 = db.file_book(
+        {"title": "T2", "author": "A", "series": ""},
+        [{"path": str(chp), "rel": "c.mp3", "title": "C",
+          "track": "1", "ext": ".mp3"}],
+        ["russian"], None, str(tmp), fps)
+    db.rename_tag("russian", "Russian Lit")
+    assert db.get_book(bid)["tags"] == ["Russian Lit", "sci-fi"], \
+        db.get_book(bid)["tags"]
+    assert db.get_book(bid2)["tags"] == ["Russian Lit"]
+    assert db.get_tag_meta("russian") is None
+    assert db.get_tag_meta("Russian Lit") is not None
+
+    # duplicate names blocked (case-insensitive)
+    assert db.tag_name_taken("russian lit", ignore="Russian Lit") is False
+    assert db.tag_name_taken("RUSSIAN LIT") is True
+    assert db.tag_name_taken("sci-fi") is True
+    try:
+        db.rename_tag("sci-fi", "russian lit")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("duplicate rename was not blocked")
+    assert db.get_tag_meta("sci-fi") is not None  # unchanged
+
+    db.close()
+
+    # migration: an old db with tags but no tag_meta gets it backfilled
+    p = tmp / "oldtags.db"
+    conn = sqlite3.connect(p)
+    conn.execute("CREATE TABLE books (id INTEGER PRIMARY KEY, title TEXT)")
+    conn.execute("CREATE TABLE tags (book_id INTEGER, tag TEXT)")
+    conn.execute("INSERT INTO books (id, title) VALUES (1, 'X')")
+    conn.execute("INSERT INTO tags VALUES (1, 'mystery')")
+    conn.commit()
+    conn.close()
+    db2 = LibraryDB(p)
+    m = db2.get_tag_meta("mystery")
+    assert m is not None and m["color"] == DEFAULT_TAG_COLOR, m
+    assert db2.visible_tags() == ["mystery"]
+    db2.close()
+    shutil.rmtree(tmp)
+
+
+# --------------------------------------------------------------------------
+# (j) Addendum C: emptied source folder removal (empty-only, safe)
+# --------------------------------------------------------------------------
+
+def t_folder_cleanup():
+    tmp = Path(tempfile.mkdtemp())
+
+    # case 1: leftovers keep the folder; leftovers are reported
+    src1 = tmp / "incoming" / "book1"
+    src1.mkdir(parents=True)
+    f1 = make_wav(src1 / "a.wav", 1, "ch1")
+    f2 = make_wav(src1 / "b.wav", 2, "ch2")
+    (src1 / "notes.nfo").write_text("nfo")
+    (src1 / "cover.jpg").write_text("fake")
+    plan = [(str(f1), str(tmp / "lib" / "a.mp3")),
+            (str(f2), str(tmp / "lib" / "b.mp3"))]
+    left = find_leftovers(plan)
+    assert str(src1) in left, left
+    assert sorted(left[str(src1)]) == ["cover.jpg", "notes.nfo"], left
+    # nothing moved yet -> folder still has the audio files too
+    removed, kept = remove_empty_dirs([str(src1)])
+    assert removed == [] and str(src1) in kept, (removed, kept)
+    assert sorted(kept[str(src1)]) == ["1 - ch1.wav", "2 - ch2.wav",
+                                       "cover.jpg", "notes.nfo"]
+
+    # case 2: after the audio files move out, empties get removed
+    libd = tmp / "lib"
+    libd.mkdir(parents=True)
+    execute_plan(plan)  # move mode
+    removed, kept = remove_empty_dirs([str(src1)])
+    assert removed == []  # nfo/jpg still there
+    assert str(src1) in kept
+    for name in ("notes.nfo", "cover.jpg"):
+        (src1 / name).unlink()
+    removed, kept = remove_empty_dirs([str(src1)])
+    assert removed == [str(src1)], (removed, kept)
+    assert not src1.exists()
+    # parents are never touched
+    assert (tmp / "incoming").exists()
+    assert tmp.exists()
+
+    # case 3: a source dir that is already empty is removed quietly
+    src3 = tmp / "incoming" / "emptybook"
+    src3.mkdir(parents=True)
+    removed, kept = remove_empty_dirs([str(src3)])
+    assert removed == [str(src3)] and kept == {}
+    assert (tmp / "incoming").exists()  # parent still there
+
+    # case 4: missing/unreadable dirs are skipped, not errors
+    removed, kept = remove_empty_dirs([str(tmp / "nope")])
+    assert removed == [] and kept == {}
+
+    shutil.rmtree(tmp)
+
 
 
 if __name__ == "__main__":

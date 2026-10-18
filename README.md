@@ -31,6 +31,21 @@ the app can never wipe it.
 `.exe` isn't code-signed. That's expected for a self-built app — click
 "More info" → "Run anyway".
 
+**GitHub lessons learned the hard way:**
+- If the Actions tab shows no build for your tag, the hidden `.github`
+  folder probably didn't upload — create
+  `.github/workflows/build.yml` in the repo manually.
+- **Upload every file, including `config.py` next to `main.py`.**
+  PyInstaller does *not* fail the build when a file is missing from the
+  repo — it only writes a warning into the build log and still ships an
+  `.exe` that dies on startup with `ModuleNotFoundError`. If a fresh
+  `.exe` won't start at all, check the repo has all the files, and
+  search the Actions build log for "missing module named". The workflow
+  now fails the build loudly if any of the app's own modules are
+  missing, instead of shipping a dead `.exe`.
+- Never re-run a release to fix the code — publish a **new** tag (e.g.
+  `v2.1.1`); re-running replays the old code.
+
 ## Run from source
 
 You need Python 3.12 on Windows.

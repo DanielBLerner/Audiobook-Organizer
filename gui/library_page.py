@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .fields import TagLineEdit
+from .fields import TagFlow, TagLineEdit
 
 SORT_OPTIONS = [
     ("Date added (newest)", "date_added", True),
@@ -34,7 +34,7 @@ THUMB = 64
 class _BookRow(QWidget):
     """One library row. Emits edit_requested via the page's signal."""
 
-    def __init__(self, book, on_edit, parent=None):
+    def __init__(self, book, on_edit, tag_meta=None, parent=None):
         super().__init__(parent)
         book_id = book.get("id")
 
@@ -74,13 +74,12 @@ class _BookRow(QWidget):
         text_col.addWidget(author_label)
         tags = book.get("tags") or []
         if tags:
-            tags_label = QLabel(
-                '<span style="color:#8a8a8a">%s</span>'
-                % html.escape(", ".join(tags)))
+            # Addendum B: tags render as their colored bubbles.
+            text_col.addWidget(TagFlow(tags, tag_meta))
         else:
             tags_label = QLabel("no tags")
             tags_label.setObjectName("muted")
-        text_col.addWidget(tags_label)
+            text_col.addWidget(tags_label)
         layout.addLayout(text_col, 1)
 
         date_label = QLabel(str(book.get("date_added") or "")[:10])
@@ -170,16 +169,22 @@ class LibraryPage(QWidget):
                             for t in wanted)]
 
         try:
-            self.tag_filter.set_tag_list(self._db.all_tags())
+            # Addendum B: hidden tags are excluded from the filter.
+            self.tag_filter.set_tag_list(self._db.visible_tags())
         except Exception:
             pass
+
+        try:
+            tag_meta = {m["tag"]: m for m in self._db.all_tag_meta()}
+        except Exception:
+            tag_meta = {}
 
         self._books = {b.get("id"): b for b in books}
         self.list.clear()
         for book in books:
             item = QListWidgetItem()
             item.setData(Qt.UserRole, book.get("id"))
-            row = _BookRow(book, self._on_edit_clicked)
+            row = _BookRow(book, self._on_edit_clicked, tag_meta)
             item.setSizeHint(QSize(0, 84))  # width stretches; fixed row height
             self.list.addItem(item)
             self.list.setItemWidget(item, row)

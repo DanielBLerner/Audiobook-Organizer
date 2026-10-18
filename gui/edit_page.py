@@ -33,7 +33,8 @@ from backend import (
 )
 
 from . import save_cover_bytes
-from .fields import ChapterListWidget, StateField, TagLineEdit
+from .fields import (ChapterListWidget, StateDateField, StateField,
+                     TagLineEdit)
 
 try:
     from send2trash import send2trash
@@ -148,7 +149,7 @@ class EditPage(QDialog):
         left.addWidget(QLabel("Tags (comma-separated):"))
         self._tag_edit = TagLineEdit()
         try:
-            self._tag_edit.set_tag_list(self._db.all_tags())
+            self._tag_edit.set_tag_list(self._db.visible_tags())
         except Exception:
             pass
         self._tag_edit.setText(", ".join(self._book.get("tags") or []))
@@ -172,6 +173,12 @@ class EditPage(QDialog):
             "Series (optional)", initial=self._book.get("series") or "",
             start_edited=True)
         right.addWidget(self._series_field)
+        # Addendum A: same Date field, same position as the Add page.
+        self._date_field = StateDateField(
+            "Date added",
+            initial=self._book.get("date_added") or None,
+            start_edited=True)
+        right.addWidget(self._date_field)
         right.addStretch(1)
 
     # -- cover ------------------------------------------------------------
@@ -265,7 +272,9 @@ class EditPage(QDialog):
 
         try:
             self._db.update_book(self._book_id, title, author, series,
-                                 tags, cover_path)
+                                 tags, cover_path,
+                                 date_added=self._date_field.date_iso()
+                                 if self._date_field else None)
         except Exception as exc:
             QMessageBox.critical(self, "Save",
                                  "Could not save changes:\n%s" % exc)

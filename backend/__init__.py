@@ -11,6 +11,7 @@ from .covers import (
 from .duplicates import check_new_book
 from .filing import (
     plan_destinations, execute_plan, fingerprint_paths, FilingError,
+    find_leftovers, remove_empty_dirs,
 )
 from .text import (
     fix_mojibake, clean_name, looks_transliterated, guess_language,
@@ -23,5 +24,6 @@ __all__ = [
     "CoverError", "UnsupportedFormatError",
     "check_new_book",
     "plan_destinations", "execute_plan", "fingerprint_paths", "FilingError",
+    "find_leftovers", "remove_empty_dirs",
     "fix_mojibake", "clean_name", "looks_transliterated", "guess_language",
 ]

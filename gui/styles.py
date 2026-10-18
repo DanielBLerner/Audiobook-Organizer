@@ -26,20 +26,20 @@ QLabel {
 QLabel#muted {
     color: #9a9a9a;
 }
-QLineEdit, QComboBox, QPlainTextEdit, QTextEdit {
+QLineEdit, QComboBox, QPlainTextEdit, QTextEdit, QDateEdit {
     background-color: #252526;
     border: 1px solid #3c3c3c;
     border-radius: 4px;
     padding: 5px;
     selection-background-color: #2a5a8a;
 }
-QLineEdit[fstate="auto"] {
+QLineEdit[fstate="auto"], QDateEdit[fstate="auto"] {
     border: 2px solid #4aa3ff;
 }
-QLineEdit[fstate="empty"] {
+QLineEdit[fstate="empty"], QDateEdit[fstate="empty"] {
     border: 2px solid #6e6e6e;
 }
-QLineEdit[fstate="edited"] {
+QLineEdit[fstate="edited"], QDateEdit[fstate="edited"] {
     border: 2px solid #3ecf5a;
 }
 QLineEdit:disabled {

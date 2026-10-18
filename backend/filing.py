@@ -15,6 +15,7 @@ already done stay done, so the GUI confirms before calling
 execute_plan().
 """
 
+import os
 import shutil
 from pathlib import Path
 
@@ -103,3 +104,52 @@ def fingerprint_paths(paths):
         except OSError:
             continue
     return out
+
+
+def find_leftovers(plan):
+    """Map each distinct source dir in the plan to the sorted list of
+    entries in that dir which the plan does NOT move.
+
+    Used by the review screen (Addendum C) to tell Daniel what will be
+    left behind - and therefore that the source folder will be kept.
+    """
+    moved = {}
+    for src, _dst in plan or []:
+        d = os.path.dirname(os.path.abspath(src))
+        moved.setdefault(d, set()).add(os.path.basename(src))
+    leftovers = {}
+    for d, names in moved.items():
+        try:
+            entries = os.listdir(d)
+        except OSError:
+            continue
+        rest = sorted(e for e in entries if e not in names)
+        if rest:
+            leftovers[d] = rest
+    return leftovers
+
+
+def remove_empty_dirs(dirs):
+    """Remove each directory in `dirs` ONLY if it is completely empty.
+
+    Returns (removed, kept) where `removed` is the list of dirs that
+    were removed and `kept` maps each remaining dir to its sorted
+    leftover entries. Parent directories are never touched - only the
+    exact dirs given. os.rmdir() is inherently empty-only, so a folder
+    that still contains anything at all can never be deleted here.
+    """
+    removed, kept = [], {}
+    for d in dict.fromkeys(dirs or []):
+        try:
+            entries = sorted(os.listdir(d))
+        except OSError:
+            continue  # gone or unreadable: nothing to do
+        if entries:
+            kept[d] = entries
+            continue
+        try:
+            os.rmdir(d)
+        except OSError:
+            continue  # raced or permission: leave it alone
+        removed.append(d)
+    return removed, kept

@@ -1,13 +1,17 @@
-"""Reusable widgets: StateField, TagLineEdit, ChapterListWidget."""
+"""Reusable widgets: StateField, StateDateField, TagLineEdit,
+ChapterListWidget, TagBubble, TagFlow."""
 
 import html
 
-from PySide6.QtCore import Qt, QStringListModel
+from PySide6.QtCore import QDate, QPoint, QRect, QSize, Qt, QStringListModel
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCompleter,
+    QDateEdit,
     QHBoxLayout,
     QLabel,
+    QLayout,
     QLineEdit,
     QListWidget,
     QListWidgetItem,
@@ -245,3 +249,214 @@ class ChapterListWidget(QWidget):
         if chapter and chapter.get("path"):
             self.player.load(chapter["path"])
             self.player.play()
+
+
+# ----------------------------------------------------------------------
+# Date field with the same outline-state rules as StateField
+# (Addendum A)
+# ----------------------------------------------------------------------
+
+class StateDateField(QWidget):
+    """A labelled date picker (QDateEdit + calendar popup).
+
+    Layout: label ABOVE the picker. Outline states via the ``fstate``
+    dynamic property, same rules as StateField:
+      - initial value (today)            -> "auto"   (blue)
+      - user picks a different date      -> "edited" (green)
+    A date can't be empty; there is no "empty" state.
+    Programmatic set_date() never marks the field edited.
+    """
+
+    def __init__(self, label_text, initial=None, parent=None,
+                 start_edited=False):
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(3)
+
+        self.label = QLabel(label_text)
+        layout.addWidget(self.label)
+
+        self.edit = QDateEdit()
+        self.edit.setCalendarPopup(True)
+        self.edit.setDisplayFormat("yyyy-MM-dd")
+        self.edit.setDate(self._to_qdate(initial) or QDate.currentDate())
+        layout.addWidget(self.edit)
+
+        self.edit.dateChanged.connect(self._on_user_date_changed)
+
+        if initial and start_edited:
+            self._state = "edited"
+        else:
+            self._state = "auto"
+        self._apply_state()
+
+    # -- state ------------------------------------------------------
+    @staticmethod
+    def _to_qdate(value):
+        if isinstance(value, QDate):
+            return value if value.isValid() else None
+        if isinstance(value, str) and value.strip():
+            d = QDate.fromString(value.strip()[:10], "yyyy-MM-dd")
+            return d if d.isValid() else None
+        return None
+
+    def _on_user_date_changed(self, _date):
+        self._state = "edited"
+        self._apply_state()
+
+    def _apply_state(self):
+        self.edit.setProperty("fstate", self._state)
+        refresh_style(self.edit)
+
+    def state(self):
+        return self._state
+
+    # -- value ------------------------------------------------------
+    def date(self):
+        return self.edit.date()
+
+    def date_iso(self):
+        return self.edit.date().toString("yyyy-MM-dd")
+
+    def set_date(self, value):
+        """Programmatic set: does not touch the state."""
+        d = self._to_qdate(value)
+        if d is None:
+            return
+        self.edit.blockSignals(True)
+        try:
+            self.edit.setDate(d)
+        finally:
+            self.edit.blockSignals(False)
+
+
+# ----------------------------------------------------------------------
+# Tag bubbles (Addendum B)
+# ----------------------------------------------------------------------
+
+def bubble_text_color(hex_color):
+    """Black or white text, whichever reads better on the bubble."""
+    try:
+        c = QColor(str(hex_color))
+        if not c.isValid():
+            return "#ffffff"
+        # Relative luminance (sRGB).
+        r, g, b = (c.redF(), c.greenF(), c.blueF())
+
+        def _lin(v):
+            return v / 12.92 if v <= 0.03928 else ((v + 0.055) / 1.055) ** 2.4
+
+        lum = 0.2126 * _lin(r) + 0.7152 * _lin(g) + 0.0722 * _lin(b)
+        return "#111111" if lum > 0.45 else "#ffffff"
+    except Exception:
+        return "#ffffff"
+
+
+class TagBubble(QLabel):
+    """A tag rendered as a colored rounded pill (per Daniel's sketch)."""
+
+    def __init__(self, text, color_hex="#4aa3ff", parent=None):
+        super().__init__(text, parent)
+        self.set_color(color_hex, text)
+
+    def set_color(self, color_hex, text=None):
+        color_hex = str(color_hex or "#4aa3ff")
+        if text is not None:
+            self.setText(text)
+        fg = bubble_text_color(color_hex)
+        self.setStyleSheet(
+            "QLabel { background-color: %s; color: %s; "
+            "border-radius: 10px; padding: 3px 12px; }"
+            % (color_hex, fg))
+
+
+class FlowLayout(QLayout):
+    """Wrapping left-to-right layout for tag bubbles."""
+
+    def __init__(self, parent=None, margin=0, hspacing=6, vspacing=6):
+        super().__init__(parent)
+        self.setContentsMargins(margin, margin, margin, margin)
+        self._hspacing = hspacing
+        self._vspacing = vspacing
+        self._items = []
+
+    def addItem(self, item):
+        self._items.append(item)
+
+    def count(self):
+        return len(self._items)
+
+    def itemAt(self, index):
+        if 0 <= index < len(self._items):
+            return self._items[index]
+        return None
+
+    def takeAt(self, index):
+        if 0 <= index < len(self._items):
+            return self._items.pop(index)
+        return None
+
+    def expandingDirections(self):
+        return Qt.Orientations(0)
+
+    def hasHeightForWidth(self):
+        return True
+
+    def heightForWidth(self, width):
+        return self._do_layout(QRect(0, 0, width, 0), True)
+
+    def setGeometry(self, rect):
+        super().setGeometry(rect)
+        self._do_layout(rect, False)
+
+    def sizeHint(self):
+        return self.minimumSize()
+
+    def minimumSize(self):
+        size = QSize()
+        for item in self._items:
+            size = size.expandedTo(item.minimumSize())
+        margins = self.contentsMargins()
+        size += QSize(margins.left() + margins.right(),
+                      margins.top() + margins.bottom())
+        return size
+
+    def _do_layout(self, rect, test_only):
+        margins = self.contentsMargins()
+        x = rect.x() + margins.left()
+        y = rect.y() + margins.top()
+        line_height = 0
+        max_x = rect.x() + rect.width() - margins.right()
+        for item in self._items:
+            hint = item.sizeHint()
+            next_x = x + hint.width() + self._hspacing
+            if next_x - self._hspacing > max_x and line_height > 0:
+                x = rect.x() + margins.left()
+                y += line_height + self._vspacing
+                next_x = x + hint.width() + self._hspacing
+                line_height = 0
+            if not test_only:
+                item.setGeometry(QRect(QPoint(x, y), hint))
+            x = next_x
+            line_height = max(line_height, hint.height())
+        return y + line_height - rect.y() + margins.bottom()
+
+
+class TagFlow(QWidget):
+    """A wrapping row of TagBubble widgets for a book's tags.
+
+    tags: list of tag strings.
+    meta: {tag: {"color": hex, "hidden": bool}}; unknown tags get the
+          default bubble color.
+    """
+
+    def __init__(self, tags, meta=None, parent=None):
+        super().__init__(parent)
+        from db import DEFAULT_TAG_COLOR
+        meta = meta or {}
+        layout = FlowLayout(self, margin=0)
+        for tag in tags or []:
+            m = meta.get(tag) or {}
+            bubble = TagBubble(tag, m.get("color") or DEFAULT_TAG_COLOR)
+            layout.addWidget(bubble)

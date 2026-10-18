@@ -16,6 +16,7 @@ from backend import (
     can_set_cover,
     execute_plan,
     fingerprint_paths,
+    remove_empty_dirs,
     scan,
     set_cover,
 )
@@ -71,10 +72,12 @@ class FileWorker(QThread):
         book:        {title, author, series}
         chapters:    ordered list of {title, ext, track} matching plan order
         tags:        list of str
+        date_added:  ISO date string for the book record
         library_dir: the book's folder inside the library (str)
+        source_dirs: distinct source folders the plan moves files out of
     """
 
-    finished = Signal(int, list)  # (book_id, cover_failures: [str])
+    finished = Signal(int, list, dict)  # (book_id, cover_failures, folder_report)
     error = Signal(str)
 
     def __init__(self, plan, db_path, filing, cover_bytes, cover_cache_dir,
@@ -142,12 +145,22 @@ class FileWorker(QThread):
                     cover_path,
                     library_dir,
                     fingerprints,
+                    date_added=self._filing.get("date_added") or None,
                 )
             finally:
                 db.close()
                 db = None
 
-            self.finished.emit(book_id, cover_failures)
+            # Addendum C: remove the emptied source folder(s) - only in
+            # move mode (in copy mode the originals must stay), only
+            # when completely empty, never parents.
+            folder_report = {"removed": [], "kept": {}}
+            if self._file_mode == "move":
+                source_dirs = self._filing.get("source_dirs") or []
+                removed, kept = remove_empty_dirs(source_dirs)
+                folder_report = {"removed": removed, "kept": kept}
+
+            self.finished.emit(book_id, cover_failures, folder_report)
         except FilingError as exc:
             self.error.emit("Filing failed: %s" % exc)
         except Exception as exc:

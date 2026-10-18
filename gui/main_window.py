@@ -12,6 +12,7 @@ the Settings menu reopens the same wizard for later changes.
 import os
 
 from PySide6.QtWidgets import (
+    QDialog,
     QMainWindow,
     QTabWidget,
 )
@@ -52,6 +53,8 @@ class MainWindow(QMainWindow):
         settings_menu = self.menuBar().addMenu("Settings")
         settings_action = settings_menu.addAction("Library settings\u2026")
         settings_action.triggered.connect(self._open_settings)
+        edit_tags_action = settings_menu.addAction("Edit tags\u2026")
+        edit_tags_action.triggered.connect(self._open_tag_manager)
 
         # -- status bar --------------------------------------------------
         self.statusBar().showMessage("Ready")
@@ -86,10 +89,16 @@ class MainWindow(QMainWindow):
                           self._show_status("Book deleted.")))
         dlg.exec()
 
+    def _open_tag_manager(self):
+        from .tag_manager import TagManagerDialog
+        dlg = TagManagerDialog(self._db, self)
+        dlg.tags_changed.connect(self.library_page.refresh)
+        dlg.exec()
+
     def _open_settings(self):
         old_root = (self._cfg.get("library_root") or "").strip()
         wiz = SetupWizard(self._cfg, self)
-        if wiz.exec() != wiz.Accepted:
+        if wiz.exec() != QDialog.DialogCode.Accepted:
             return
         new_cfg = wiz.result_config()
         self._cfg.update(new_cfg)

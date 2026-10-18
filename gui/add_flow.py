@@ -25,9 +25,11 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from backend import check_new_book, extract_cover, plan_destinations, scan
+from backend import (check_new_book, extract_cover, find_leftovers,
+                   plan_destinations, scan)
 
-from .fields import ChapterListWidget, StateField, TagLineEdit
+from .fields import (ChapterListWidget, StateDateField, StateField,
+                     TagLineEdit)
 from .workers import FileWorker, ScanWorker
 
 LANG_TAG = {
@@ -140,6 +142,7 @@ class AddFlowWidget(QWidget):
 
         # Screen-1/2 widget refs (rebuilt per book)
         self._title_field = self._author_field = self._series_field = None
+        self._date_field = None
         self._tag_edit = None
         self._cover_label = None
         self._chapter_list = None
@@ -176,10 +179,12 @@ class AddFlowWidget(QWidget):
         self._filing = {}
         self._scan_roots = []
         self._title_field = self._author_field = self._series_field = None
+        self._date_field = None
         self._tag_edit = None
         self._cover_label = None
         self._chapter_list = None
         self._chapters_screen_built = False
+        self._leftovers = {}
         self._landing.status_label.setText("")
         self._landing.browse_btn.setEnabled(True)
         self._clear_widget(self._screen1)
@@ -273,7 +278,7 @@ class AddFlowWidget(QWidget):
             self._load_book(merged[0])
             return
         dlg = _BookPickDialog(merged, self)
-        if dlg.exec() == QDialog.Accepted and dlg.selected_book() is not None:
+        if dlg.exec() == QDialog.DialogCode.Accepted and dlg.selected_book() is not None:
             self._load_book(dlg.selected_book())
         # else: user cancelled -> stay on landing, nothing kept
 
@@ -321,7 +326,7 @@ class AddFlowWidget(QWidget):
         self._tag_edit = TagLineEdit()
         self._tag_edit.setPlaceholderText("e.g. russian, fantasy")
         try:
-            self._tag_edit.set_tag_list(self._db.all_tags())
+            self._tag_edit.set_tag_list(self._db.visible_tags())
         except Exception:
             pass
         suggested = LANG_TAG.get((book.get("lang") or "").strip(), "english")
@@ -369,6 +374,11 @@ class AddFlowWidget(QWidget):
 
         self._series_field = StateField("Series (optional)", initial="")
         right.addWidget(self._series_field)
+
+        # Addendum A: Date field directly under Series. Auto-populated
+        # with today (blue); Daniel can backdate it (green).
+        self._date_field = StateDateField("Date added")
+        right.addWidget(self._date_field)
         right.addStretch(1)
 
         # -- nav ------------------------------------------------------
@@ -509,6 +519,8 @@ class AddFlowWidget(QWidget):
                       if self._author_field else "",
             "series": self._series_field.text().strip()
                       if self._series_field else "",
+            "date_added": self._date_field.date_iso()
+                          if self._date_field else "",
             "tags": self._tag_edit.tags() if self._tag_edit else [],
         }
 
@@ -558,9 +570,20 @@ class AddFlowWidget(QWidget):
                 for ch in chapters
             ],
             "tags": values["tags"],
+            "date_added": values["date_added"],
             "library_dir": str(Path(self._plan[0][1]).parent)
                            if self._plan else "",
+            "source_dirs": sorted({os.path.dirname(os.path.abspath(src))
+                                   for src, _dst in self._plan}),
         }
+
+        # Addendum C: figure out now (for the review screen) which files
+        # in the source folder(s) are NOT part of this book. Those stay
+        # behind, so the source folder will be kept.
+        try:
+            self._leftovers = find_leftovers(self._plan) or {}
+        except Exception:
+            self._leftovers = {}
 
         self._clear_widget(self._screen3)
         layout = QVBoxLayout(self._screen3)
@@ -597,6 +620,10 @@ class AddFlowWidget(QWidget):
         info.addWidget(QLabel("<b>%s</b>"
                               % html.escape(values["title"] or "Untitled")))
         info.addWidget(QLabel(html.escape(values["author"] or "Unknown author")))
+        if values["date_added"]:
+            date_row = QLabel(html.escape(values["date_added"]))
+            date_row.setObjectName("muted")
+            info.addWidget(date_row)
         if values["tags"]:
             info.addWidget(QLabel(html.escape(", ".join(values["tags"]))))
         else:
@@ -632,6 +659,23 @@ class AddFlowWidget(QWidget):
             dup_label.setText('<span style="color:#8a8a8a">'
                               "No duplicates found.</span>")
         cl.addWidget(dup_label)
+
+        # Addendum C: warn when leftover files will keep the source
+        # folder in place.
+        if self._leftovers:
+            left_label = QLabel()
+            left_label.setWordWrap(True)
+            parts = []
+            for d, names in self._leftovers.items():
+                shown = ", ".join(names[:8])
+                if len(names) > 8:
+                    shown += ", \u2026 (%d more)" % (len(names) - 8)
+                parts.append(
+                    "The source folder will be kept - these %d file(s) "
+                    "are not part of the book and will stay behind:<br>"
+                    "&nbsp;&nbsp;%s" % (len(names), html.escape(shown)))
+            left_label.setText("<br><br>".join(parts))
+            cl.addWidget(left_label)
 
         # -- actions -------------------------------------------------
         actions = QHBoxLayout()
@@ -711,7 +755,7 @@ class AddFlowWidget(QWidget):
         self._file_worker.error.connect(self._on_file_error)
         self._file_worker.start()
 
-    def _on_file_finished(self, book_id, cover_failures):
+    def _on_file_finished(self, book_id, cover_failures, folder_report):
         self._finish_worker(self._file_worker)
         self._file_worker = None
         detail = "The book was added to your library."
@@ -719,6 +763,21 @@ class AddFlowWidget(QWidget):
             detail += ("\n\nCover art could not be embedded into "
                        "%d file(s):\n- %s"
                        % (len(cover_failures), "\n- ".join(cover_failures)))
+        folder_report = folder_report or {}
+        removed = folder_report.get("removed") or []
+        kept = folder_report.get("kept") or {}
+        if removed:
+            detail += ("\n\nEmptied source folder removed:\n- %s"
+                       % "\n- ".join(removed))
+        if kept:
+            bits = []
+            for d, names in kept.items():
+                shown = ", ".join(names[:8])
+                if len(names) > 8:
+                    shown += ", \u2026 (%d more)" % (len(names) - 8)
+                bits.append("%s\n  (kept: %s)" % (d, shown))
+            detail += ("\n\nSource folder kept - not empty:\n- %s"
+                       % "\n- ".join(bits))
         QMessageBox.information(self, "Added to library", detail)
         self.status_message.emit("Book added to the library.")
         self.book_filed.emit(book_id)
