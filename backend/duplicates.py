@@ -37,6 +37,34 @@ def _norm(s):
     return re.sub(r"\s+", " ", s).strip()
 
 
+def author_key(name):
+    """Word-order-insensitive author key (Addendum E): normalized with
+    the words sorted, so 'Ливадный Андрей' and 'Андрей Ливадный'
+    produce the same key."""
+    return " ".join(sorted(_norm(name).split()))
+
+
+def find_author_variants(author, db):
+    """Existing library authors that are the same name written
+    differently (Addendum E): same author_key, different raw text.
+    An exact same spelling is not a variant - it files into the same
+    author folder anyway."""
+    author = (author or "").strip()
+    if not author:
+        return []
+    key = author_key(author)
+    if not key:
+        return []
+    out = []
+    for existing in db.all_authors():
+        existing = (existing or "").strip()
+        if existing == author:
+            continue
+        if author_key(existing) == key:
+            out.append(existing)
+    return out
+
+
 def check_new_book(new_book, db):
     """Compare a scanned book dict against the library database.
 
