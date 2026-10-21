@@ -570,6 +570,7 @@ class AddFlowWidget(QWidget):
             "book": {"title": values["title"],
                      "author": values["author"],
                      "series": values["series"]},
+            "kind": plan_book["kind"],
             "chapters": [
                 {"title": ch.get("title") or "",
                  "ext": ch.get("ext") or Path(ch.get("path") or "").suffix,
@@ -794,7 +795,8 @@ class AddFlowWidget(QWidget):
         self._file_worker.error.connect(self._on_file_error)
         self._file_worker.start()
 
-    def _on_file_finished(self, book_id, cover_failures, folder_report):
+    def _on_file_finished(self, book_id, cover_failures, tag_failures,
+                          folder_report):
         self._finish_worker(self._file_worker)
         self._file_worker = None
         detail = "The book was added to your library."
@@ -802,6 +804,10 @@ class AddFlowWidget(QWidget):
             detail += ("\n\nCover art could not be embedded into "
                        "%d file(s):\n- %s"
                        % (len(cover_failures), "\n- ".join(cover_failures)))
+        if tag_failures:
+            detail += ("\n\nTags could not be written into "
+                       "%d file(s):\n- %s"
+                       % (len(tag_failures), "\n- ".join(tag_failures)))
         folder_report = folder_report or {}
         removed = folder_report.get("removed") or []
         kept = folder_report.get("kept") or {}
