@@ -34,7 +34,7 @@ from backend import (
 
 from . import save_cover_bytes
 from .fields import (ChapterListWidget, StateDateField, StateField,
-                     TagLineEdit)
+                     TagEntry)
 
 try:
     from send2trash import send2trash
@@ -146,13 +146,15 @@ class EditPage(QDialog):
         cover_btns.addWidget(remove_btn)
         left.addLayout(cover_btns)
 
-        left.addWidget(QLabel("Tags (comma-separated):"))
-        self._tag_edit = TagLineEdit()
+        left.addWidget(QLabel("Tags:"))
+        self._tag_edit = TagEntry()
         try:
             self._tag_edit.set_tag_list(self._db.visible_tags())
+            self._tag_edit.set_meta(
+                {m["tag"]: m for m in self._db.all_tag_meta()})
         except Exception:
             pass
-        self._tag_edit.setText(", ".join(self._book.get("tags") or []))
+        self._tag_edit.set_tags(self._book.get("tags") or [])
         left.addWidget(self._tag_edit)
         left.addStretch(1)
 
@@ -168,6 +170,11 @@ class EditPage(QDialog):
         self._author_field = StateField(
             "Author", initial=self._book.get("author") or "",
             start_edited=True)
+        # Addendum E: same author autocomplete as the Add page.
+        try:
+            self._author_field.set_completions(self._db.all_authors())
+        except Exception:
+            pass
         right.addWidget(self._author_field)
         self._series_field = StateField(
             "Series (optional)", initial=self._book.get("series") or "",
