@@ -8,7 +8,7 @@ from .covers import (
     extract_cover, set_cover, can_set_cover,
     CoverError, UnsupportedFormatError,
 )
-from .duplicates import check_new_book
+from .duplicates import check_new_book, author_key, find_author_variants
 from .filing import (
     plan_destinations, execute_plan, fingerprint_paths, FilingError,
     find_leftovers, remove_empty_dirs,
@@ -22,7 +22,7 @@ __all__ = [
     "find_folder_cover",
     "extract_cover", "set_cover", "can_set_cover",
     "CoverError", "UnsupportedFormatError",
-    "check_new_book",
+    "check_new_book", "author_key", "find_author_variants",
     "plan_destinations", "execute_plan", "fingerprint_paths", "FilingError",
     "find_leftovers", "remove_empty_dirs",
     "fix_mojibake", "clean_name", "looks_transliterated", "guess_language",
