@@ -26,10 +26,14 @@ from PySide6.QtWidgets import (
 
 from backend import (
     CoverError,
+    EBOOK_EXTS,
+    TagError,
     UnsupportedFormatError,
     can_set_cover,
+    can_write_tags,
     extract_cover,
     set_cover,
+    write_tags,
 )
 
 from . import save_cover_bytes
@@ -319,6 +323,44 @@ class EditPage(QDialog):
                 "Changes saved, but cover art could not be embedded into "
                 "%d file(s):\n- %s"
                 % (len(failures), "\n- ".join(failures)))
+
+        # Addendum I: keep the files' own tags in sync with the saved
+        # details - same write-back as at filing. Ebooks are excluded
+        # (a filed ebook is a single chapter with an ebook extension).
+        tag_failures = []
+        is_ebook = (len(ordered) == 1
+                    and (ordered[0].get("ext")
+                         or Path(ordered[0].get("path") or "").suffix
+                         ).lower() in EBOOK_EXTS)
+        if not is_ebook:
+            single = len(ordered) == 1
+            for pos, ch in enumerate(ordered):
+                path = ch.get("path") or ""
+                if not path or not os.path.isfile(path):
+                    continue
+                if not can_write_tags(path):
+                    tag_failures.append(
+                        "%s: no tag writer for '%s' files"
+                        % (os.path.basename(path),
+                           Path(path).suffix.lower() or "unknown"))
+                    continue
+                tag_title = title if single else (ch.get("title") or title)
+                try:
+                    write_tags(path, title=tag_title, artist=author,
+                               album=title, track=pos + 1)
+                except TagError as exc:
+                    tag_failures.append("%s: %s"
+                                        % (os.path.basename(path), exc))
+                except Exception as exc:
+                    tag_failures.append("%s: %s: %s"
+                                        % (os.path.basename(path),
+                                           type(exc).__name__, exc))
+        if tag_failures:
+            QMessageBox.warning(
+                self, "Save",
+                "Changes saved, but tags could not be written into "
+                "%d file(s):\n- %s"
+                % (len(tag_failures), "\n- ".join(tag_failures)))
 
         self.book_saved.emit(self._book_id)
         self.accept()
