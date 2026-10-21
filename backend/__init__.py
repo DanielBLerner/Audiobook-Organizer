@@ -16,6 +16,9 @@ from .filing import (
 from .text import (
     fix_mojibake, clean_name, looks_transliterated, guess_language,
 )
+from .tags import (
+    write_tags, write_book_tags, can_write_tags, TagError,
+)
 
 __all__ = [
     "scan", "AUDIO_EXTS", "EBOOK_EXTS", "SUPPORTED_EXTS",
@@ -26,4 +29,5 @@ __all__ = [
     "plan_destinations", "execute_plan", "fingerprint_paths", "FilingError",
     "find_leftovers", "remove_empty_dirs",
     "fix_mojibake", "clean_name", "looks_transliterated", "guess_language",
+    "write_tags", "write_book_tags", "can_write_tags", "TagError",
 ]
