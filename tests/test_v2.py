@@ -27,6 +27,7 @@ from backend import (  # noqa: E402
     execute_plan, fingerprint_paths, FilingError,
     find_leftovers, remove_empty_dirs,
     fix_mojibake, clean_name, looks_transliterated, guess_language,
+    write_tags, write_book_tags, can_write_tags, TagError,
 )
 from backend.grouping import group_items  # noqa: E402
 from db import LibraryDB, DEFAULT_TAG_COLOR  # noqa: E402
@@ -576,6 +577,8 @@ def main():
     check("(j) folder cleanup", t_folder_cleanup)
     check("(k) author variants", t_author_variants)
     check("(l) language tag capitalization", t_lang_tag_capitalization)
+    check("(m) mojibake repair (mixed/layered)", t_mojibake_repair)
+    check("(n) tag write-back", t_tag_writeback)
     print(f"\nALL {len(PASS)} TESTS PASSED")
     return 0
 
@@ -827,6 +830,122 @@ def t_lang_tag_capitalization():
     assert sorted(db.get_book(bid)["tags"]) == \
         ["English", "Russian", "sci-fi"]
     db.close()
+    shutil.rmtree(tmp)
+
+
+# --------------------------------------------------------------------------
+# (m) Addendum I: mojibake repair - mixed and layered encodings
+# --------------------------------------------------------------------------
+
+# Exact tag strings from Daniel's real file 1_0_c0yz.mp3 (2026-10-21).
+# cp1252-only characters and raw C1 control bytes sit in the same
+# value, so neither latin-1 nor cp1252 can re-encode them - the old
+# repair returned all three unchanged.
+REAL_TALB = "\xd0\u0178\xd0\xb0\xd0\xb2\xd0\xb5\xd0\xbb \xd0\u0178\xd1\u0192\xd0\xbd\xd0\xb8\xd1\u2021\xd0\xb5\xd0\xb2. \xc2\xab\xd0\u2014\xd0\xb5\xd0\xbc\xd0\xbb\xd1\x8f \xd0\xb6\xd0\xb8\xd0\xb7\xd0\xbd\xd0\xb8 \xd0\xb8 \xd1\x81\xd0\xbc\xd0\xb5\xd1\u20ac\xd1\u201a\xd0\xb8. \xd0\u0161\xd0\xbd\xd0\xb8\xd0\xb3\xd0\xb0 6. \xd0\u0153\xd0\xb8\xd1\u20ac \xd0\xb6\xd0\xb8\xd0\xb7\xd0\xbd\xd0\xb8 \xd0\xb8 \xd1\x81\xd0\xbc\xd0\xb5\xd1\u20ac\xd1\u201a\xd0\xb8. \xd0\u017e\xd1\u201a\xd0\xbf\xd1\u0192\xd1\x81\xd0\xba\xc2\xbb"
+REAL_TPE1 = "\xd0\x90\xd0\xbb\xd0\xb5\xd0\xba\xd1\x81\xd0\xb0\xd0\xbd\xd0\xb4\xd1\u20ac \xd0\u2018\xd0\xb0\xd1\u02c6\xd0\xba\xd0\xbe\xd0\xb2"
+REAL_TIT2 = "\xd0\u0178\xd0\xb0\xd0\xb2\xd0\xb5\xd0\xbb \xd0\u0178\xd1\u0192\xd0\xbd\xd0\xb8\xd1\u2021\xd0\xb5\xd0\xb2. \xc2\xab\xd0\u2014\xd0\xb5\xd0\xbc\xd0\xbb\xd1\x8f \xd0\xb6\xd0\xb8\xd0\xb7\xd0\xbd\xd0\xb8 \xd0\xb8 \xd1\x81\xd0\xbc\xd0\xb5\xd1\u20ac\xd1\u201a\xd0\xb8. \xd0\u0161\xd0\xbd\xd0\xb8\xd0\xb3\xd0\xb0 6. \xd0\u0153\xd0\xb8\xd1\u20ac \xd0\xb6\xd0\xb8\xd0\xb7\xd0\xbd\xd0\xb8 \xd0\xb8 \xd1\x81\xd0\xbc\xd0\xb5\xd1\u20ac\xd1\u201a\xd0\xb8. \xd0\u017e\xd1\u201a\xd0\xbf\xd1\u0192\xd1\x81\xd0\xba\xc2\xbb. \xd0\xa7\xd0\xb0\xd1\x81\xd1\u201a\xd1\u0152 1"
+CLEAN_ALBUM = ("Павел Пуничев. «Земля жизни и смерти. Книга 6. "
+               "Мир жизни и смерти. Отпуск»")
+CLEAN_ARTIST = "Александр Башков"
+
+
+def t_mojibake_repair():
+    # Daniel's real mixed-encoding strings repair fully
+    assert fix_mojibake(REAL_TALB) == CLEAN_ALBUM, fix_mojibake(REAL_TALB)
+    assert fix_mojibake(REAL_TPE1) == CLEAN_ARTIST, \
+        fix_mojibake(REAL_TPE1)
+    assert fix_mojibake(REAL_TIT2) == CLEAN_ALBUM + ". Часть 1", \
+        fix_mojibake(REAL_TIT2)
+
+    title = "Пролог. Эпизод 6"
+    author = "Александр Ливадный"
+    # layered: the same mangling applied twice peels twice
+    once = title.encode("utf-8").decode("latin-1")
+    twice = once.encode("utf-8").decode("latin-1")
+    assert fix_mojibake(once) == title, fix_mojibake(once)
+    assert fix_mojibake(twice) == title, fix_mojibake(twice)
+    # the cp1251 pattern: UTF-8 bytes once decoded as cp1251
+    assert fix_mojibake(title.encode("utf-8").decode("cp1251")) == title
+    # ...and that garble then stored and mangled once more
+    layered = title.encode("utf-8").decode("cp1251") \
+        .encode("utf-8").decode("latin-1")
+    assert fix_mojibake(layered) == title, fix_mojibake(layered)
+    # one-layer basics still work
+    assert fix_mojibake(author.encode("cp1251").decode("latin-1")) == author
+    assert fix_mojibake(title.encode("utf-8").decode("cp1252")) == title
+    # legitimate text is untouched
+    for legit in ("Zoë", "Café", "Müller", "Grüße", "naïve",
+                  "Bobiverse", "Привет", author, ""):
+        assert fix_mojibake(legit) == legit, legit
+
+
+# --------------------------------------------------------------------------
+# (n) Addendum I: tag write-back at filing
+# --------------------------------------------------------------------------
+
+def t_tag_writeback():
+    from mutagen.id3 import ID3, TDRC
+    from mutagen.mp3 import EasyMP3
+
+    tmp = Path(tempfile.mkdtemp())
+    srcdir = tmp / "in"
+    srcdir.mkdir()
+    p1 = srcdir / "one.mp3"
+    p2 = srcdir / "two.mp3"
+    make_mp3(p1, "garbled old title", "Old Author", "Old Album", 9)
+    make_mp3(p2, "garbled old title 2", "Old Author", "Old Album", 8)
+    # an unrelated frame must survive the write-back untouched
+    t = ID3(str(p1))
+    t.add(TDRC(encoding=3, text="2023"))
+    t.save(str(p1))
+
+    book = {"author": CLEAN_ARTIST, "book": "Отпуск", "series": "",
+            "chapters": [
+                {"path": str(p1), "title": "Часть 1", "ext": ".mp3",
+                 "kind": "audio"},
+                {"path": str(p2), "title": "Часть 2", "ext": ".mp3",
+                 "kind": "audio"},
+            ]}
+    plan = plan_destinations(book, tmp / "Library")
+    execute_plan(plan)
+    filing_chapters = [{"title": "Часть 1", "ext": ".mp3", "track": ""},
+                       {"title": "Часть 2", "ext": ".mp3", "track": ""}]
+    failures = write_book_tags({"title": "Отпуск", "author": CLEAN_ARTIST},
+                               plan, filing_chapters)
+    assert failures == [], failures
+    a1 = EasyMP3(plan[0][1])
+    a2 = EasyMP3(plan[1][1])
+    assert a1["album"] == ["Отпуск"] and a1["artist"] == [CLEAN_ARTIST], a1
+    assert a1["title"] == ["Часть 1"] and a1["tracknumber"] == ["1"], a1
+    assert a2["title"] == ["Часть 2"] and a2["tracknumber"] == ["2"], a2
+    assert str(ID3(plan[0][1])["TDRC"].text[0]) == "2023"
+
+    # single-file book: the title tag is the book title
+    p3 = srcdir / "solo.mp3"
+    make_mp3(p3, "whatever", "whoever", "whatever", 1)
+    book1 = {"author": "A U Thor", "book": "Solo Book", "series": "",
+             "chapters": [{"path": str(p3), "title": "Only Chapter",
+                           "ext": ".mp3", "kind": "audio"}]}
+    plan1 = plan_destinations(book1, tmp / "Library")
+    execute_plan(plan1)
+    failures = write_book_tags(
+        {"title": "Solo Book", "author": "A U Thor"}, plan1,
+        [{"title": "Only Chapter", "ext": ".mp3", "track": ""}])
+    assert failures == [], failures
+    a3 = EasyMP3(plan1[0][1])
+    assert a3["title"] == ["Solo Book"] and a3["album"] == ["Solo Book"], a3
+    assert a3["artist"] == ["A U Thor"] and a3["tracknumber"] == ["1"], a3
+
+    # unsupported formats: reported, never raised to the caller
+    assert can_write_tags(".mp3") is True
+    assert can_write_tags(".wav") is False
+    try:
+        write_tags(str(srcdir / "x.wav"), title="t", artist="a",
+                   album="b", track=1)
+    except TagError:
+        pass
+    else:
+        raise AssertionError("write_tags accepted a .wav file")
     shutil.rmtree(tmp)
 
 
