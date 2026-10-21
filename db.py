@@ -120,6 +120,25 @@ class LibraryDB:
             "INSERT OR IGNORE INTO tag_meta (tag, color, hidden) "
             "SELECT DISTINCT tag, ?, 0 FROM tags",
             (DEFAULT_TAG_COLOR,))
+        # Addendum G: capitalize the auto-suggested language tags.
+        # If exactly one spelling of the tag exists and it is not the
+        # capitalized form, rename it everywhere (books + metadata),
+        # the same propagation the tag manager's rename uses. If both
+        # forms somehow exist, leave them alone.
+        cur.execute(
+            "SELECT tag FROM (SELECT tag FROM tags "
+            "UNION SELECT tag FROM tag_meta)")
+        all_tag_texts = [r["tag"] for r in cur.fetchall()]
+        for low, cap in (("russian", "Russian"), ("english", "English")):
+            variants = {t for t in all_tag_texts
+                        if (t or "").lower() == low}
+            if len(variants) == 1 and cap not in variants:
+                old = next(iter(variants))
+                cur.execute("UPDATE OR IGNORE tags SET tag=? WHERE tag=?",
+                            (cap, old))
+                cur.execute(
+                    "UPDATE OR IGNORE tag_meta SET tag=? WHERE tag=?",
+                    (cap, old))
         self._conn.commit()
 
     # ------------------------------------------------------------------
@@ -285,6 +304,16 @@ class LibraryDB:
             cur = self._conn.cursor()
             cur.execute("SELECT DISTINCT tag FROM tags ORDER BY tag")
             return [r["tag"] for r in cur.fetchall()]
+
+    def all_authors(self):
+        """Distinct author names already in the library (Addendum E)."""
+        with self._lock:
+            cur = self._conn.cursor()
+            cur.execute(
+                "SELECT DISTINCT author FROM books "
+                "WHERE author IS NOT NULL AND TRIM(author) <> '' "
+                "ORDER BY author COLLATE NOCASE")
+            return [r["author"] for r in cur.fetchall()]
 
     # ------------------------------------------------------------------
     # Tag metadata (Addendum B): color + hidden flag per tag. Tags are
