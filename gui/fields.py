@@ -506,7 +506,12 @@ class TagFlow(QWidget):
 # ----------------------------------------------------------------------
 
 class _TagChip(QWidget):
-    """One committed tag inside TagEntry: colored pill + a × button."""
+    """One committed tag inside TagEntry: a colored pill.
+
+    Addendum H: clicking the pill itself removes the tag - there is
+    no separate x button (it rendered as a stray empty bubble next
+    to the tag in the dark theme).
+    """
 
     removed = Signal(str)
 
@@ -515,14 +520,19 @@ class _TagChip(QWidget):
         self._text = text
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(2)
-        layout.addWidget(TagBubble(text, color_hex))
-        btn = QPushButton("\u00d7")  # ×
-        btn.setFlat(True)
-        btn.setFixedWidth(18)
-        btn.setToolTip("Remove tag")
-        btn.clicked.connect(lambda _c=False: self.removed.emit(self._text))
-        layout.addWidget(btn)
+        layout.setSpacing(0)
+        bubble = TagBubble(text, color_hex)
+        bubble.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        layout.addWidget(bubble)
+        self.setToolTip("Click to remove this tag")
+        self.setCursor(Qt.PointingHandCursor)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.removed.emit(self._text)
+            event.accept()
+            return
+        super().mousePressEvent(event)
 
 
 class TagEntry(QWidget):
@@ -532,8 +542,8 @@ class TagEntry(QWidget):
     - Autocomplete suggests known tags (set_tag_list); picking one
       commits it. A typed name that matches a known tag
       (case-insensitively) snaps to the known spelling and color.
-    - Clicking a bubble's ×, or Backspace with an empty field, removes
-      that tag. Committing a duplicate does nothing.
+    - Clicking a bubble (Addendum H), or Backspace with an empty
+      field, removes that tag. Committing a duplicate does nothing.
     - A brand-new name is kept as typed with the default color; its
       tag_meta row is created when the book is filed.
     """
