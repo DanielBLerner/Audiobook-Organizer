@@ -3,7 +3,8 @@ ChapterListWidget, TagBubble, TagFlow."""
 
 import html
 
-from PySide6.QtCore import QDate, QPoint, QRect, QSize, Qt, QStringListModel
+from PySide6.QtCore import (QDate, QEvent, QPoint, QRect, QSize, Qt,
+                            QStringListModel, Signal)
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -82,6 +83,19 @@ class StateField(QWidget):
     # -- value ------------------------------------------------------
     def text(self):
         return self.edit.text()
+
+    def set_completions(self, options):
+        """Autocomplete for the inner line edit (Addendum E): suggests
+        existing values, matched case-insensitively anywhere in the
+        name. Picking one fills the field."""
+        model = QStringListModel(
+            sorted({str(o) for o in (options or []) if o}), self)
+        completer = QCompleter(model, self)
+        completer.setCaseSensitivity(Qt.CaseInsensitive)
+        completer.setFilterMode(Qt.MatchContains)
+        completer.setCompletionMode(QCompleter.PopupCompletion)
+        self.edit.setCompleter(completer)
+        self._completer = completer
 
     def set_text(self, text):
         """Programmatic set: does not touch the state."""
@@ -372,13 +386,19 @@ class TagBubble(QLabel):
 
 
 class FlowLayout(QLayout):
-    """Wrapping left-to-right layout for tag bubbles."""
+    """Wrapping left-to-right layout for tag bubbles.
 
-    def __init__(self, parent=None, margin=0, hspacing=6, vspacing=6):
+    align="right" right-aligns each wrapped line within the available
+    width (Addendum D: library-row tags sit on the right).
+    """
+
+    def __init__(self, parent=None, margin=0, hspacing=6, vspacing=6,
+                 align="left"):
         super().__init__(parent)
         self.setContentsMargins(margin, margin, margin, margin)
         self._hspacing = hspacing
         self._vspacing = vspacing
+        self._align = align
         self._items = []
 
     def addItem(self, item):
@@ -424,23 +444,40 @@ class FlowLayout(QLayout):
 
     def _do_layout(self, rect, test_only):
         margins = self.contentsMargins()
-        x = rect.x() + margins.left()
-        y = rect.y() + margins.top()
-        line_height = 0
-        max_x = rect.x() + rect.width() - margins.right()
+        left = rect.x() + margins.left()
+        top = rect.y() + margins.top()
+        width = rect.width() - margins.left() - margins.right()
+
+        # Group items into lines first (needed for right alignment).
+        lines = []
+        cur, cur_w, cur_h = [], 0, 0
         for item in self._items:
             hint = item.sizeHint()
-            next_x = x + hint.width() + self._hspacing
-            if next_x - self._hspacing > max_x and line_height > 0:
-                x = rect.x() + margins.left()
-                y += line_height + self._vspacing
-                next_x = x + hint.width() + self._hspacing
-                line_height = 0
-            if not test_only:
-                item.setGeometry(QRect(QPoint(x, y), hint))
-            x = next_x
-            line_height = max(line_height, hint.height())
-        return y + line_height - rect.y() + margins.bottom()
+            w = hint.width()
+            extra = w if not cur else self._hspacing + w
+            if cur and cur_w + extra > width:
+                lines.append((cur, cur_w, cur_h))
+                cur, cur_w, cur_h = [], 0, 0
+                extra = w
+            cur.append((item, hint))
+            cur_w += extra
+            cur_h = max(cur_h, hint.height())
+        if cur:
+            lines.append((cur, cur_w, cur_h))
+
+        y = top
+        for line_items, line_w, line_h in lines:
+            x = left
+            if self._align == "right":
+                x = left + max(0, width - line_w)
+            for item, hint in line_items:
+                if not test_only:
+                    item.setGeometry(QRect(QPoint(x, y), hint))
+                x += hint.width() + self._hspacing
+            y += line_h + self._vspacing
+        if not lines:
+            return margins.top() + margins.bottom()
+        return y - self._vspacing - rect.y() + margins.bottom()
 
 
 class TagFlow(QWidget):
@@ -451,12 +488,164 @@ class TagFlow(QWidget):
           default bubble color.
     """
 
-    def __init__(self, tags, meta=None, parent=None):
+    def __init__(self, tags, meta=None, parent=None, align_right=False):
         super().__init__(parent)
         from db import DEFAULT_TAG_COLOR
         meta = meta or {}
-        layout = FlowLayout(self, margin=0)
+        layout = FlowLayout(self, margin=0,
+                            align="right" if align_right else "left")
         for tag in tags or []:
             m = meta.get(tag) or {}
             bubble = TagBubble(tag, m.get("color") or DEFAULT_TAG_COLOR)
             layout.addWidget(bubble)
+
+
+# ----------------------------------------------------------------------
+# Tag entry widget (Addendum F): type + Enter makes colored bubbles
+# underneath the field, like the Library rows show.
+# ----------------------------------------------------------------------
+
+class _TagChip(QWidget):
+    """One committed tag inside TagEntry: colored pill + a × button."""
+
+    removed = Signal(str)
+
+    def __init__(self, text, color_hex, parent=None):
+        super().__init__(parent)
+        self._text = text
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(2)
+        layout.addWidget(TagBubble(text, color_hex))
+        btn = QPushButton("\u00d7")  # ×
+        btn.setFlat(True)
+        btn.setFixedWidth(18)
+        btn.setToolTip("Remove tag")
+        btn.clicked.connect(lambda _c=False: self.removed.emit(self._text))
+        layout.addWidget(btn)
+
+
+class TagEntry(QWidget):
+    """Tag field where typing + Enter commits colored bubbles below.
+
+    - Enter or a comma commits the typed tag; the field clears.
+    - Autocomplete suggests known tags (set_tag_list); picking one
+      commits it. A typed name that matches a known tag
+      (case-insensitively) snaps to the known spelling and color.
+    - Clicking a bubble's ×, or Backspace with an empty field, removes
+      that tag. Committing a duplicate does nothing.
+    - A brand-new name is kept as typed with the default color; its
+      tag_meta row is created when the book is filed.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._tags = []   # committed tag texts, in entry order
+        self._meta = {}   # tag -> {"color": hex, "hidden": bool}
+        self._known = []  # canonical tag names for autocomplete
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+
+        self.edit = QLineEdit()
+        self.edit.setPlaceholderText("Type a tag, press Enter\u2026")
+        layout.addWidget(self.edit)
+
+        self._flow_host = QWidget()
+        self._flow = FlowLayout(self._flow_host, margin=0)
+        layout.addWidget(self._flow_host)
+
+        self._completer = QCompleter(self)
+        self._completer.setCaseSensitivity(Qt.CaseInsensitive)
+        self._completer.setFilterMode(Qt.MatchContains)
+        self._completer.setCompletionMode(QCompleter.PopupCompletion)
+        self._completer.setModel(QStringListModel([], self._completer))
+        self._completer.activated.connect(self._commit)
+        self.edit.setCompleter(self._completer)
+
+        self.edit.returnPressed.connect(
+            lambda: self._commit(self.edit.text()))
+        self.edit.textChanged.connect(self._on_text_changed)
+        self.edit.installEventFilter(self)
+
+    # -- data -------------------------------------------------------
+    def tags(self):
+        return list(self._tags)
+
+    def set_tags(self, tags):
+        self._tags = []
+        for t in tags or []:
+            self._add(t)
+        self._rebuild()
+
+    def set_tag_list(self, tags):
+        self._known = [str(t) for t in (tags or []) if t]
+        self._completer.model().setStringList(sorted(set(self._known)))
+
+    def set_meta(self, meta):
+        self._meta = dict(meta or {})
+        self._rebuild()
+
+    # -- internals --------------------------------------------------
+    def _canonical(self, text):
+        low = text.lower()
+        for known in self._known:
+            if known.lower() == low:
+                return known
+        for existing in self._tags:
+            if existing.lower() == low:
+                return existing
+        return text
+
+    def _color_of(self, text):
+        from db import DEFAULT_TAG_COLOR
+        m = self._meta.get(text) or {}
+        return m.get("color") or DEFAULT_TAG_COLOR
+
+    def _commit(self, text):
+        text = (text or "").strip().strip(",").strip()
+        if text:
+            self._add(text)
+            self._rebuild()
+        self.edit.clear()
+
+    def _add(self, text):
+        text = self._canonical((text or "").strip())
+        if not text:
+            return
+        if any(t.lower() == text.lower() for t in self._tags):
+            return
+        self._tags.append(text)
+
+    def _remove(self, text):
+        self._tags = [t for t in self._tags if t != text]
+        self._rebuild()
+
+    def _rebuild(self):
+        while self._flow.count():
+            item = self._flow.takeAt(0)
+            w = item.widget() if item is not None else None
+            if w is not None:
+                w.setParent(None)
+                w.deleteLater()
+        for tag in self._tags:
+            chip = _TagChip(tag, self._color_of(tag))
+            chip.removed.connect(self._remove)
+            self._flow.addWidget(chip)
+        self._flow_host.updateGeometry()
+
+    def _on_text_changed(self, text):
+        if "," in text:
+            head, _sep, tail = text.partition(",")
+            self._commit(head)
+            if tail.strip():
+                self.edit.setText(tail)
+
+    def eventFilter(self, obj, event):
+        if obj is self.edit and event.type() == QEvent.Type.KeyPress:
+            if event.key() == Qt.Key.Key_Backspace \
+                    and not self.edit.text() and self._tags:
+                self._remove(self._tags[-1])
+                return True
+        return super().eventFilter(obj, event)
