@@ -23,6 +23,7 @@ from backend import (  # noqa: E402
     scan, AUDIO_EXTS, EBOOK_EXTS, SUPPORTED_EXTS, find_folder_cover,
     extract_cover, set_cover, can_set_cover, CoverError,
     UnsupportedFormatError, check_new_book, plan_destinations,
+    author_key, find_author_variants,
     execute_plan, fingerprint_paths, FilingError,
     find_leftovers, remove_empty_dirs,
     fix_mojibake, clean_name, looks_transliterated, guess_language,
@@ -573,6 +574,8 @@ def main():
     check("(h) date added backdate", t_date_added)
     check("(i) tag metadata", t_tag_meta)
     check("(j) folder cleanup", t_folder_cleanup)
+    check("(k) author variants", t_author_variants)
+    check("(l) language tag capitalization", t_lang_tag_capitalization)
     print(f"\nALL {len(PASS)} TESTS PASSED")
     return 0
 
@@ -760,6 +763,71 @@ def t_folder_cleanup():
 
     shutil.rmtree(tmp)
 
+
+
+# --------------------------------------------------------------------------
+# (k) Addendum E: author near-match (same name, different word order)
+# --------------------------------------------------------------------------
+
+def t_author_variants():
+    tmp = Path(tempfile.mkdtemp())
+    db = LibraryDB(tmp / "lib.db")
+
+    # the key ignores word order, case and punctuation
+    assert author_key("Ливадный Андрей") == author_key("Андрей Ливадный")
+    assert author_key("Smith, John") == author_key("John Smith")
+    assert author_key("Андрей Ливадный") != author_key("Андрей Ливадная")
+
+    def file_authored(title, author):
+        return db.file_book(
+            {"title": title, "author": author, "series": ""},
+            [], [], None, str(tmp), {})
+
+    file_authored("Book One", "Андрей Ливадный")
+    file_authored("Book Two", "Someone Else")
+
+    assert set(db.all_authors()) == {"Андрей Ливадный", "Someone Else"}
+    # same name, words swapped -> the existing spelling is offered
+    assert find_author_variants("Ливадный Андрей", db) == ["Андрей Ливадный"]
+    # exact spelling -> no variant (same folder anyway)
+    assert find_author_variants("Андрей Ливадный", db) == []
+    # unrelated / empty -> nothing
+    assert find_author_variants("Другой Автор", db) == []
+    assert find_author_variants("", db) == []
+
+    db.close()
+    shutil.rmtree(tmp)
+
+
+# --------------------------------------------------------------------------
+# (l) Addendum G: lowercase language tags capitalized on open
+# --------------------------------------------------------------------------
+
+def t_lang_tag_capitalization():
+    tmp = Path(tempfile.mkdtemp())
+    p = tmp / "lib.db"
+    db = LibraryDB(p)
+    bid = db.file_book(
+        {"title": "B", "author": "A", "series": ""},
+        [], ["russian", "english", "sci-fi"], None, str(tmp), {})
+    db.close()
+
+    # reopening runs the migration: russian->Russian, english->English,
+    # other tags and their metadata untouched
+    db = LibraryDB(p)
+    assert sorted(db.get_book(bid)["tags"]) == \
+        ["English", "Russian", "sci-fi"], db.get_book(bid)["tags"]
+    meta = {m["tag"] for m in db.all_tag_meta()}
+    assert "Russian" in meta and "English" in meta, meta
+    assert "russian" not in meta and "english" not in meta, meta
+    db.close()
+
+    # idempotent: a second reopen changes nothing
+    db = LibraryDB(p)
+    assert sorted(db.get_book(bid)["tags"]) == \
+        ["English", "Russian", "sci-fi"]
+    db.close()
+    shutil.rmtree(tmp)
 
 
 if __name__ == "__main__":
