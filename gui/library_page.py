@@ -72,15 +72,19 @@ class _BookRow(QWidget):
         author_label = QLabel(html.escape(book.get("author") or "Unknown author"))
         author_label.setObjectName("muted")
         text_col.addWidget(author_label)
+        layout.addLayout(text_col, 1)
+
+        # Addendum D: tag bubbles live in their own area on the right,
+        # right-aligned, just before the date (they used to sit under
+        # the author, leaving a wide empty gap).
         tags = book.get("tags") or []
         if tags:
-            # Addendum B: tags render as their colored bubbles.
-            text_col.addWidget(TagFlow(tags, tag_meta))
+            tags_widget = TagFlow(tags, tag_meta, align_right=True)
         else:
-            tags_label = QLabel("no tags")
-            tags_label.setObjectName("muted")
-            text_col.addWidget(tags_label)
-        layout.addLayout(text_col, 1)
+            tags_widget = QLabel("no tags")
+            tags_widget.setObjectName("muted")
+            tags_widget.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        layout.addWidget(tags_widget, 2, Qt.AlignVCenter)
 
         date_label = QLabel(str(book.get("date_added") or "")[:10])
         date_label.setObjectName("muted")
