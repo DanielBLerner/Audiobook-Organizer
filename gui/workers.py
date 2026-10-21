@@ -19,6 +19,7 @@ from backend import (
     remove_empty_dirs,
     scan,
     set_cover,
+    write_book_tags,
 )
 from db import LibraryDB
 
@@ -64,9 +65,11 @@ class FileWorker(QThread):
     """Execute a filing plan in the background.
 
     Steps: execute_plan -> embed cover art into moved files (failures
-    are collected, never fatal) -> fingerprint moved files ->
-    db.file_book. A fresh LibraryDB connection is opened inside this
-    thread; the GUI's db instance is never touched from here.
+    are collected, never fatal) -> write the confirmed tags into the
+    moved files (Addendum I; failures collected, never fatal) ->
+    fingerprint moved files -> db.file_book. A fresh LibraryDB
+    connection is opened inside this thread; the GUI's db instance
+    is never touched from here.
 
     ``filing`` dict keys:
         book:        {title, author, series}
@@ -77,7 +80,8 @@ class FileWorker(QThread):
         source_dirs: distinct source folders the plan moves files out of
     """
 
-    finished = Signal(int, list, dict)  # (book_id, cover_failures, folder_report)
+    finished = Signal(int, list, list, dict)
+    # (book_id, cover_failures, tag_failures, folder_report)
     error = Signal(str)
 
     def __init__(self, plan, db_path, filing, cover_bytes, cover_cache_dir,
@@ -112,6 +116,19 @@ class FileWorker(QThread):
                         cover_failures.append(
                             "%s: %s: %s" % (os.path.basename(dst),
                                            type(exc).__name__, exc))
+
+            # Addendum I: write the confirmed metadata into the moved
+            # files' own tags (best effort, like the cover embedding;
+            # ebooks are excluded - no tag write-back for them).
+            tag_failures = []
+            if (self._filing.get("kind") or "audio") != "ebook":
+                try:
+                    tag_failures = write_book_tags(
+                        self._filing.get("book") or {},
+                        self._plan,
+                        self._filing.get("chapters") or [])
+                except Exception as exc:  # never let tags kill filing
+                    tag_failures = ["%s: %s" % (type(exc).__name__, exc)]
 
             fingerprints = fingerprint_paths(dest_paths)
 
@@ -160,7 +177,8 @@ class FileWorker(QThread):
                 removed, kept = remove_empty_dirs(source_dirs)
                 folder_report = {"removed": removed, "kept": kept}
 
-            self.finished.emit(book_id, cover_failures, folder_report)
+            self.finished.emit(book_id, cover_failures, tag_failures,
+                               folder_report)
         except FilingError as exc:
             self.error.emit("Filing failed: %s" % exc)
         except Exception as exc:
