@@ -25,12 +25,23 @@ def fix_mojibake(s):
     """Repair Cyrillic text mangled by wrong-encoding reads
     (e.g. 'ÐŸÑ€Ð¸Ð²ÐµÑ‚' -> 'Привет').
 
-    A repair is only accepted when it clearly produces Russian text, so
-    legitimate names like 'cafe' or 'Zoë' are left alone.
+    Handles the cases found in real rips (Addendum I):
+    - one-layer mojibake (UTF-8 read as Latin-1/cp1252, cp1251 read
+      as Latin-1);
+    - MIXED strings, where cp1252-only characters (Ÿ, ') and raw C1
+      control bytes sit in the same value - no single codec can
+      re-encode those, so the original bytes are recovered leniently;
+    - layered mojibake (mangled more than once): layers are peeled
+      one at a time until the text stops changing;
+    - the 'РџСЂ…' pattern (UTF-8 bytes once decoded as cp1251).
+
+    A repair is only accepted when it clearly produces or approaches
+    Russian text, so legitimate names like 'cafe' or 'Zoë' are left
+    alone.
     """
     if not s:
         return s
-    for _ in range(3):  # handle double-mangled text
+    for _ in range(4):  # peel one layer per pass
         new = _fix_once(s)
         if new == s:
             break
@@ -38,20 +49,70 @@ def fix_mojibake(s):
     return s
 
 
-def _fix_once(s):
-    candidates = []
-    for enc in ("latin-1", "cp1252"):
+def _recover_bytes(s):
+    """Best-effort recovery of the bytes a mojibake string came from.
+
+    Each character is encoded as cp1252 when possible (covers the
+    printable extras like Ÿ and '), otherwise as its raw byte value
+    for characters up to U+00FF (covers the C1 control bytes cp1252
+    leaves undefined). Returns None when a character fits neither -
+    e.g. proper Cyrillic, which needs no repair.
+    """
+    out = bytearray()
+    for ch in s:
         try:
-            candidates.append(s.encode(enc).decode("utf-8"))
-        except (UnicodeEncodeError, UnicodeDecodeError):
+            out += ch.encode("cp1252")
+            continue
+        except UnicodeEncodeError:
             pass
-    try:
-        candidates.append(s.encode("latin-1").decode("cp1251"))
-    except (UnicodeEncodeError, UnicodeDecodeError):
-        pass
-    for c in candidates:
-        if c != s and cyrillic_ratio(c) >= 0.4:
+        o = ord(ch)
+        if o <= 0xFF:
+            out.append(o)
+        else:
+            return None
+    return bytes(out)
+
+
+def _fix_once(s):
+    raw = _recover_bytes(s)
+
+    # 1) The recovered bytes are UTF-8 (the common case, including
+    #    mixed strings and outer layers of multi-mangled text). A
+    #    successful strict UTF-8 decode is itself strong evidence:
+    #    ordinary Latin-1 text almost never forms valid UTF-8. Peel
+    #    the layer; the loop re-checks the result.
+    if raw is not None:
+        try:
+            c = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            c = None
+        if c is not None and c != s and "\ufffd" not in c:
             return c
+
+    # 2) The 'РџСЂ…' pattern: the string IS Cyrillic-looking, but its
+    #    cp1251 bytes are themselves UTF-8. Proper Russian text
+    #    essentially never survives this round trip, so a successful
+    #    decode with a strong Cyrillic result is a true repair.
+    try:
+        c = s.encode("cp1251").decode("utf-8")
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        c = None
+    if c is not None and c != s and cyrillic_ratio(c) >= 0.4:
+        return c
+
+    # 3) cp1251 bytes read as Latin-1 (old ID3v2.3 rips). Only
+    #    accepted when the result is clearly Russian and the input
+    #    was not - this is the candidate that can false-positive on
+    #    mangled noise, so it goes last and never starts from text
+    #    that already looks Russian.
+    if raw is not None and cyrillic_ratio(s) < 0.4:
+        try:
+            c = raw.decode("cp1251")
+        except UnicodeDecodeError:
+            c = None
+        if c is not None and c != s and cyrillic_ratio(c) >= 0.5:
+            return c
+
     return s
 
 
