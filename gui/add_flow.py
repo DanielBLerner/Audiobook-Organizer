@@ -25,16 +25,16 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from backend import (check_new_book, extract_cover, find_leftovers,
-                   plan_destinations, scan)
+from backend import (check_new_book, extract_cover, find_author_variants,
+                     find_leftovers, plan_destinations, scan)
 
 from .fields import (ChapterListWidget, StateDateField, StateField,
-                     TagLineEdit)
+                     TagEntry)
 from .workers import FileWorker, ScanWorker
 
 LANG_TAG = {
-    "Russian": "russian",
-    "Russian (transliterated?)": "russian",
+    "Russian": "Russian",
+    "Russian (transliterated?)": "Russian",
 }
 
 COVER_BOX = 260  # px; the "about 1/4 of screen" cover on Screen 1
@@ -322,15 +322,16 @@ class AddFlowWidget(QWidget):
         cover_btns.addWidget(remove_btn)
         left.addLayout(cover_btns)
 
-        left.addWidget(QLabel("Tags (comma-separated):"))
-        self._tag_edit = TagLineEdit()
-        self._tag_edit.setPlaceholderText("e.g. russian, fantasy")
+        left.addWidget(QLabel("Tags:"))
+        self._tag_edit = TagEntry()
         try:
             self._tag_edit.set_tag_list(self._db.visible_tags())
+            self._tag_edit.set_meta(
+                {m["tag"]: m for m in self._db.all_tag_meta()})
         except Exception:
             pass
-        suggested = LANG_TAG.get((book.get("lang") or "").strip(), "english")
-        self._tag_edit.setText(suggested)
+        suggested = LANG_TAG.get((book.get("lang") or "").strip(), "English")
+        self._tag_edit.set_tags([suggested])
         left.addWidget(self._tag_edit)
         left.addStretch(1)
 
@@ -370,6 +371,12 @@ class AddFlowWidget(QWidget):
             author_flags.append(("no author found", _note("author")))
         self._author_field = StateField("Author", initial=author_guess,
                                         flags=author_flags)
+        # Addendum E: suggest authors already in the library so an
+        # existing spelling gets reused instead of duplicated.
+        try:
+            self._author_field.set_completions(self._db.all_authors())
+        except Exception:
+            pass
         right.addWidget(self._author_field)
 
         self._series_field = StateField("Series (optional)", initial="")
@@ -660,6 +667,31 @@ class AddFlowWidget(QWidget):
                               "No duplicates found.</span>")
         cl.addWidget(dup_label)
 
+        # Addendum E: same author, different word order/spelling ->
+        # warn and offer the existing name, so the book doesn't file
+        # into a second author folder. Daniel decides; the app never
+        # renames on its own.
+        try:
+            author_variants = find_author_variants(values["author"],
+                                                   self._db)
+        except Exception:
+            author_variants = []
+        if author_variants:
+            cl.addWidget(QLabel("<b>Author name:</b>"))
+            for variant in author_variants:
+                row = QHBoxLayout()
+                warn = QLabel(
+                    "Your library already has this author as '%s'."
+                    % html.escape(variant))
+                warn.setWordWrap(True)
+                row.addWidget(warn, 1)
+                use_btn = QPushButton("Use '%s'" % variant)
+                use_btn.clicked.connect(
+                    lambda _c=False, v=variant:
+                    self._use_author_variant(v))
+                row.addWidget(use_btn)
+                cl.addLayout(row)
+
         # Addendum C: warn when leftover files will keep the source
         # folder in place.
         if self._leftovers:
@@ -719,6 +751,13 @@ class AddFlowWidget(QWidget):
                 "%d of these %d files are byte-identical to files in '%s'."
                 % (n, total, key))
         return lines
+
+    def _use_author_variant(self, variant):
+        """Addendum E: adopt the existing author spelling, then rebuild
+        the review so the destination preview and filing use it."""
+        if self._author_field is not None:
+            self._author_field.set_text(variant)
+        self._build_review()
 
     def _review_back(self):
         chapters = (self._book or {}).get("chapters") or []
